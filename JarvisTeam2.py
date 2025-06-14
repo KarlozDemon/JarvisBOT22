@@ -15,7 +15,7 @@ from datetime import datetime
 CANALES_OBJETIVO_IDS = [
     1383150424722509904, # WolfTeam 24/7 - Clan2 Voz
     1375567307782357048, # PiscoSour™ - Team2 Voz
-    1289641663701979146, # NyxLeyendasWT - Otros Games
+    1381032704124125226, # NyxLeyendasWT - Otros Games
 ]
 DB_FILE = "usuarios_frecuentes.db"
 
@@ -216,6 +216,7 @@ def obtener_frase_bienvenida(nombre, veces):
     return random.choice(frases)
 
 def obtener_frase_despedida(nombre):
+    saludo = obtener_saludo_por_hora()
     frases = [
         f"¡Nos vemos, {nombre}! Descansa. {saludo}.",
         f"¡Chau, {nombre}! {saludo} y pásala bien.",
