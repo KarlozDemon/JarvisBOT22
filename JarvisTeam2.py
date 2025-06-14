@@ -140,7 +140,7 @@ def obtener_frase_bienvenida(nombre, veces):
             f"¡Hola, {nombre}! Nos alegra mucho que estés aquí.",
             f"Un placer conocerte, {nombre}. Esperamos que la pases bien.",
             f"¡Es genial verte por aquí, {nombre}! Bienvenido.",
-            f"{nombre}, eres muy bienvenido/a en este espacio.",
+            f"{nombre}, eres muy bienvenido en este espacio.",
             f"{nombre}, gracias por unirte. Esperamos que disfrutes tu tiempo.",
             f"{nombre}, esta es tu primera visita hoy. ¡Disfrútala!",
             f"{nombre}, es un gusto saludarte por primera vez.",
