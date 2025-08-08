@@ -55,7 +55,7 @@ def incrementar_veces_usuario(guild_id, user_id):
 # ========================== FUNCIONES DE TEXTO Y SALUDOS =======================
 
 NOMBRES_ESPECIALES = {
-    "jose is back": "José",
+    "José is back": "José",
     "jᴏꜱᴇ ɪꜱ ʙᴀᴄᴋ": "José"
 }
 
@@ -71,7 +71,23 @@ frases_rapida = [
     "¡{nombre}, apenas llegaste y ya te vas!",
     "¡Te fuiste tan rápido como llegaste, {nombre}!",
 ]
-    
+
+frases_inicio_stream = [
+    "¡{nombre} está transmitiendo, a mirar ese talento con aimbot!",
+    "¡{nombre} está transmitiendo! Veremos cuántos kills hace hoy en cada game.",
+    "¡Atención, todos! {nombre} empezó el game en vivo, ¿Quién trae las palomitas?",
+    "¡{nombre} compartiendo pantalla! Momento de juzgar su habilidad.",
+    "¡Ahora veremos si {nombre} es antiguo o nuevo!",
+]
+
+frases_fin_stream = [
+    "{nombre} apagó el stream, ¿será que perdió la partida?",
+    "Fin de la transmisión de {nombre}. ¿GG o FF?",
+    "¡Listo! {nombre} dejó de compartir, todos a esperar el próximo en vivo.",
+    "{nombre} terminó el streaming, que opinan juega o no juega.",
+    "¡Se acabó el espectáculo! {nombre} cortó transmisión.",
+]
+ 
 def limpiar_nombre(nombre):
     # Hardcode para casos especiales
     nombre_original = nombre.lower()
@@ -140,7 +156,7 @@ def obtener_frase_bienvenida(nombre, veces):
             f"¡Hola, {nombre}! Nos alegra mucho que estés aquí.",
             f"Un placer conocerte, {nombre}. Esperamos que la pases bien.",
             f"¡Es genial verte por aquí, {nombre}! Bienvenido.",
-            f"{nombre}, eres muy bienvenido en este espacio.",
+            f"{nombre}, eres muy bienvenido en este lugar.",
             f"{nombre}, gracias por unirte. Esperamos que disfrutes tu tiempo.",
             f"{nombre}, esta es tu primera visita hoy. ¡Disfrútala!",
             f"{nombre}, es un gusto saludarte por primera vez.",
@@ -347,18 +363,36 @@ async def on_voice_state_update(member, before, after):
             else:
                 text = f"{nombre_limpio} se ha desconectado. ¡Cuídate!"
             await play_audio(voice_client, text)
+    
+    # === Evento de INICIO DE TRANSMISIÓN DE PANTALLA ===
+    if after.channel and after.channel.id in CANALES_OBJETIVO_IDS:
+        if not before.self_stream and after.self_stream:
+           nombre_limpio = limpiar_nombre(member.display_name)
+           texto = random.choice(frases_inicio_stream).format(nombre=nombre_limpio)
+           voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
+           if voice_client and voice_client.is_connected():
+               await play_audio(voice_client, texto)
 
-        # === Desconexión inteligente ===
-        if voice_client and voice_client.is_connected() and voice_client.channel:
-            usuarios_humanos = [m for m in voice_client.channel.members if not m.bot]
-            if len(usuarios_humanos) == 1:
-                unico = usuarios_humanos[0]
-                text = f"{unico.display_name}, parece que ahora estás solo. ¡Aquí sigo contigo!"
-                await play_audio(voice_client, text)
-            elif not usuarios_humanos:
-                text = "Parece que me quedé solito aquí…"
-                await play_audio(voice_client, text)
-                await voice_client.disconnect()
+    # === Evento de FIN DE TRANSMISIÓN DE PANTALLA ===
+    if before.channel and before.channel.id in CANALES_OBJETIVO_IDS:
+        if before.self_stream and not after.self_stream:
+            nombre_limpio = limpiar_nombre(member.display_name)
+            texto = random.choice(frases_fin_stream).format(nombre=nombre_limpio)
+            voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
+            if voice_client and voice_client.is_connected():
+                await play_audio(voice_client, texto)
+
+    # === Desconexión inteligente ===
+    if voice_client and voice_client.is_connected() and voice_client.channel:
+        usuarios_humanos = [m for m in voice_client.channel.members if not m.bot]
+        if len(usuarios_humanos) == 1:
+            unico = usuarios_humanos[0]
+            text = f"{unico.display_name}, parece que ahora estás solo. ¡Aquí sigo contigo!"
+            await play_audio(voice_client, text)
+        elif not usuarios_humanos:
+            text = "Parece que me quedé solito aquí…"
+            await play_audio(voice_client, text)
+            await voice_client.disconnect()
 
 # ========================== SERVIDOR FLASK KEEP-ALIVE ==========================
 app = Flask(__name__)
