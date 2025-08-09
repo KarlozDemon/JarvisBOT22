@@ -13,9 +13,9 @@ from datetime import datetime
 
 # ========================== CONFIGURACIÓN GENERAL ==============================
 CANALES_OBJETIVO_IDS = [
-    1383150424722509904, # WolfTeam 24/7 - Clan2 Voz
+    1383150424722509904, # Pride Battle - Clan2 Voz
     1375567307782357048, # PiscoSour™ - Team2 Voz
-    1381032704124125226, # NyxLeyendasWT - Otros Games
+    1381032704124125226, # NyxLeyendasWT - NyxLeyendasWT
 ]
 DB_FILE = "usuarios_frecuentes.db"
 
@@ -54,9 +54,10 @@ def incrementar_veces_usuario(guild_id, user_id):
 
 # ========================== FUNCIONES DE TEXTO Y SALUDOS =======================
 
+# CAMBIO: llaves en minúsculas para que el .lower() matchee
 NOMBRES_ESPECIALES = {
-    "José is back": "José",
-    "jᴏꜱᴇ ɪꜱ ʙᴀᴄᴋ": "José"
+    "josé is back": "José",
+    "jᴏꜱᴇ ɪꜱ ʙᴀᴄᴋ": "José" 
 }
 
 frases_rapida = [
@@ -83,25 +84,24 @@ frases_inicio_stream = [
 frases_fin_stream = [
     "{nombre} apagó el stream, ¿será que perdió la partida?",
     "Fin de la transmisión de {nombre}. ¿GG o FF?",
-    "¡Listo! {nombre} dejó de compartir, todos a esperar el próximo en vivo.",
+    "¡Listo! {nombre} dejo de compartir, todos a esperar el próximo en vivo.",
     "{nombre} terminó el streaming, que opinan juega o no juega.",
-    "¡Se acabó el espectáculo! {nombre} cortó transmisión.",
+    "¡Se acabó el espectáculo! {nombre} corto trasmisión.",
 ]
  
 def limpiar_nombre(nombre):
-    # Hardcode para casos especiales
-    nombre_original = nombre.lower()
-    if nombre_original in NOMBRES_ESPECIALES:
-        return NOMBRES_ESPECIALES[nombre_original]
+    # CAMBIO: usar clave en lower para casos especiales
+    clave = nombre.lower()
+    if clave in NOMBRES_ESPECIALES:
+        return NOMBRES_ESPECIALES[clave]
 
-    # Paso 1: Normaliza el nombre a NFKC para juntar caracteres combinados y “fantasía”
+    # Paso 1: Normaliza el nombre a NFKC
     nombre = unicodedata.normalize('NFKC', nombre)
 
-    # Paso 2: Elimina símbolos, emojis y puntuación, deja solo letras y números de cualquier idioma
+    # Paso 2: Elimina símbolos, emojis y puntuación, deja solo letras y números
     limpio = ""
     for c in nombre:
         categoria = unicodedata.category(c)
-        # Letras (L*), números (N*), o espacios
         if categoria.startswith('L') or categoria.startswith('N') or c.isspace():
             limpio += c
     # Paso 3: Remueve espacios repetidos y capitaliza por palabra
@@ -279,6 +279,51 @@ def obtener_frase_despedida(nombre):
 guild_locks = {}
 entradas_usuarios = {}
 
+# NUEVO: carga explícita de libopus para evitar errores en algunos entornos
+try:
+    discord.opus.load_opus("libopus.so.0")
+except Exception as e:
+    print(f"[WARN] No pude cargar libopus: {e}")
+
+# NUEVO: lock por GUILD + helper de conexión robusta
+guild_connect_locks = {}
+
+async def ensure_connected(target_channel: discord.VoiceChannel):
+    gid = target_channel.guild.id
+    if gid not in guild_connect_locks:
+        guild_connect_locks[gid] = asyncio.Lock()
+    async with guild_connect_locks[gid]:
+        vc = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
+        if vc and vc.is_connected():
+            if vc.channel and vc.channel.id == target_channel.id:
+                return vc
+            try:
+                await vc.move_to(target_channel)
+                return vc
+            except Exception as e:
+                print(f"[WARN] move_to falló: {e}; desconecto y reintento")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception as e2:
+                    print(f"[WARN] disconnect falló: {e2}")
+        try:
+            vc = await target_channel.connect(reconnect=True, timeout=10)
+            return vc
+        except Exception as e:
+            print(f"[ERROR] connect falló: {e}. Reintento una vez…")
+            try:
+                tmp = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
+                if tmp:
+                    await tmp.disconnect(force=True)
+            except Exception
+                pass
+            try:
+                vc = await target_channel.connect(reconnect=True, timeout=10)
+                return vc
+            except Exception as e2:
+                print(f"[ERROR] segundo connect falló: {e2}")
+                return None
+
 async def play_audio(vc, text):
     if vc.guild.id not in guild_locks:
         guild_locks[vc.guild.id] = asyncio.Lock()
@@ -287,12 +332,17 @@ async def play_audio(vc, text):
     try:
         async with lock:
             print(f"[AUDIO] {vc.guild.name}: {text}")
+            # CAMBIO: cortar audio previo para evitar procesos ffmpeg zombis
+            if vc.is_playing():
+                vc.stop()
+
             communicate = edge_tts.Communicate(text, voice="es-ES-ElviraNeural")
             await communicate.save(filename)
             vc.play(discord.FFmpegPCMAudio(filename, executable="ffmpeg", options='-filter:a "volume=2.0"'))
+            # CAMBIO: espera en intervalos cortos
             while vc.is_playing():
-                await asyncio.sleep(1)
-            await asyncio.sleep(1)
+                await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2)
     except Exception as e:
         print(f"[ERROR] Reproduciendo audio: {e}")
     finally:
@@ -315,43 +365,63 @@ bot = discord.Client(intents=intents)
 async def on_ready():
     print(f"JarvisTeamProSQL está online ✅\nUsuario: {bot.user} | ID: {bot.user.id}")
 
+# CAMBIO: handler reescrito con snapshots, validaciones y ensure_connected
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
+
+    # Snapshots de canales (evita carreras)
+    after_ch = after.channel
+    before_ch = before.channel
+
     nombre_limpio = limpiar_nombre(member.display_name)
-    voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
     ahora = datetime.now(pytz.timezone("America/Lima"))
 
+    # "me" seguro para permisos
+    try:
+        me = member.guild.me or await member.guild.fetch_member(bot.user.id)
+    except Exception:
+        me = None
+
     # === Evento de ENTRADA ===
-    if after.channel and after.channel.id in CANALES_OBJETIVO_IDS and (before.channel != after.channel):
-        perms = after.channel.permissions_for(member.guild.me)
-        if not perms.connect or not perms.speak:
-            print(f"[PERMISOS] No puedo conectar/hablar en: {after.channel.name}")
+    if after_ch and after_ch.id in CANALES_OBJETIVO_IDS and (before_ch != after_ch):
+        if me:
+            perms = after_ch.permissions_for(me)
+            if not perms.connect or not perms.speak:
+                print(f"[PERMISOS] No puedo conectar/hablar en: {after_ch.name}")
+                return
+
+        # DB
+        veces = incrementar_veces_usuario(member.guild.id, member.id)
+        print(f"[ENTRADA] {nombre_limpio} entró en {after_ch.name} (veces hoy: {veces})")
+
+        # Conexión/movimiento serializado por guild
+        voice_client = await ensure_connected(after_ch)
+        if not voice_client:
+            print(f"[ERROR] No pude conectar al canal de voz: {after_ch.name}")
             return
 
-        # --- Gestión con base de datos ---
-        veces = incrementar_veces_usuario(member.guild.id, member.id)
-
-        print(f"[ENTRADA] {nombre_limpio} entró en {after.channel.name} (veces hoy: {veces})")
-        if voice_client is None or not voice_client.is_connected():
-            try:
-                voice_client = await after.channel.connect()
-            except Exception as e:
-                print(f"[ERROR] No pude conectar al canal de voz: {e}")
-                return
-       
         entradas_usuarios[(member.guild.id, member.id)] = ahora
 
         text = obtener_frase_bienvenida(nombre_limpio, veces)
-        num_usuarios = len([m for m in after.channel.members if not m.bot])
-        if num_usuarios >= 20:
-            text = f"¡Wow, esto se está llenando! Bienvenido {nombre_limpio}, y saludos a todos los presentes."
+
+        # Conteo de miembros con protección
+        try:
+            miembros = list(getattr(after_ch, "members", []))
+            num_usuarios = len([m for m in miembros if not m.bot])
+            if num_usuarios >= 20:
+                text = f"¡Wow, esto se está llenando! Bienvenido {nombre_limpio}, y saludos a todos los presentes."
+        except Exception:
+            pass
+
         await play_audio(voice_client, text)
 
     # === Evento de SALIDA ===
-    if before.channel and before.channel.id in CANALES_OBJETIVO_IDS and after.channel != before.channel:
-        print(f"[SALIDA] {nombre_limpio} salió de {before.channel.name}")
+    if before_ch and before_ch.id in CANALES_OBJETIVO_IDS and after_ch != before_ch:
+        print(f"[SALIDA] {nombre_limpio} salió de {before_ch.name}")
+
+        voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
         if voice_client and voice_client.is_connected():
             entrada = entradas_usuarios.pop((member.guild.id, member.id), None)
             if entrada:
@@ -363,28 +433,38 @@ async def on_voice_state_update(member, before, after):
             else:
                 text = f"{nombre_limpio} se ha desconectado. ¡Cuídate!"
             await play_audio(voice_client, text)
-    
-    # === Evento de INICIO DE TRANSMISIÓN DE PANTALLA ===
-    if after.channel and after.channel.id in CANALES_OBJETIVO_IDS:
-        if not before.self_stream and after.self_stream:
-           nombre_limpio = limpiar_nombre(member.display_name)
-           texto = random.choice(frases_inicio_stream).format(nombre=nombre_limpio)
-           voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
-           if voice_client and voice_client.is_connected():
-               await play_audio(voice_client, texto)
 
-    # === Evento de FIN DE TRANSMISIÓN DE PANTALLA ===
-    if before.channel and before.channel.id in CANALES_OBJETIVO_IDS:
+    # === INICIO DE TRANSMISIÓN DE PANTALLA ===
+    if after_ch and after_ch.id in CANALES_OBJETIVO_IDS:
+        if not before.self_stream and after.self_stream:
+            texto = random.choice(frases_inicio_stream).format(nombre=nombre_limpio)
+            voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
+            if voice_client and voice_client.is_connected():
+                await play_audio(voice_client, texto)
+            # Si quieres hablar aunque no esté conectado, podrías:
+            # else:
+            #     vc = await ensure_connected(after_ch)
+            #     if vc:
+            #         await play_audio(vc, texto)
+
+    # === FIN DE TRANSMISIÓN DE PANTALLA ===
+    if before_ch and before_ch.id in CANALES_OBJETIVO_IDS:
         if before.self_stream and not after.self_stream:
-            nombre_limpio = limpiar_nombre(member.display_name)
             texto = random.choice(frases_fin_stream).format(nombre=nombre_limpio)
             voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
             if voice_client and voice_client.is_connected():
                 await play_audio(voice_client, texto)
 
     # === Desconexión inteligente ===
+    voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
     if voice_client and voice_client.is_connected() and voice_client.channel:
-        usuarios_humanos = [m for m in voice_client.channel.members if not m.bot]
+        vc_channel = voice_client.channel
+        try:
+            miembros = list(getattr(vc_channel, "members", []))
+        except Exception:
+            miembros = []
+        usuarios_humanos = [m for m in miembros if not m.bot]
+
         if len(usuarios_humanos) == 1:
             unico = usuarios_humanos[0]
             text = f"{unico.display_name}, parece que ahora estás solo. ¡Aquí sigo contigo!"
@@ -392,6 +472,11 @@ async def on_voice_state_update(member, before, after):
         elif not usuarios_humanos:
             text = "Parece que me quedé solito aquí…"
             await play_audio(voice_client, text)
+            try:
+                if voice_client.is_playing():
+                    voice_client.stop()
+            except Exception:
+                pass
             await voice_client.disconnect()
 
 # ========================== SERVIDOR FLASK KEEP-ALIVE ==========================
@@ -402,7 +487,9 @@ def index():
     return "¡Estoy vivo, Render! ✅"
 
 def run_web():
-    app.run(host='0.0.0.0', port=10000)
+    # CAMBIO: usar PORT de entorno si existe (Render Web Service)
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host='0.0.0.0', port=port)  # CAMBIO
 
 threading.Thread(target=run_web, daemon=True).start()
 
