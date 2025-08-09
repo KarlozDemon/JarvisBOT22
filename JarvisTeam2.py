@@ -315,7 +315,7 @@ async def ensure_connected(target_channel: discord.VoiceChannel):
                 tmp = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
                 if tmp:
                     await tmp.disconnect(force=True)
-            except Exception
+            except Exception:
                 pass
             try:
                 vc = await target_channel.connect(reconnect=True, timeout=10)
