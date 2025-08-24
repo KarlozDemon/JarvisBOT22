@@ -16,6 +16,7 @@ CANALES_OBJETIVO_IDS = [
     1383150424722509904, # Pride Battle - Clan2 Voz
     1375567307782357048, # PiscoSour™ - Team2 Voz
     1381032704124125226, # NyxLeyendasWT - NyxLeyendasWT
+    1407821913136300163, # KOUTZZ - WARHS NO KKS
 ]
 DB_FILE = "usuarios_frecuentes.db"
 
