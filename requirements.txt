@@ -5,3 +5,5 @@ pytz
 requests
 setuptools
 wheel
+psycopg2-binary
+SQLAlchemy
