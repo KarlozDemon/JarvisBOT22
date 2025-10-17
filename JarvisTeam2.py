@@ -9,6 +9,7 @@ import discord
 import edge_tts
 from flask import Flask
 import threading
+import imageio_ffmpeg
 
 # Slash commands
 from discord import app_commands
@@ -358,9 +359,22 @@ async def play_audio(vc, text):
             print(f"[AUDIO] {vc.guild.name}: {text}")
             if vc.is_playing():
                 vc.stop()
+
+            # 1) Generar MP3 con edge-tts
             communicate = edge_tts.Communicate(text, voice="es-ES-ElviraNeural")
             await communicate.save(filename)
-            vc.play(discord.FFmpegPCMAudio(filename, executable="ffmpeg", options='-filter:a "volume=2.0"'))
+
+            # 2) Usar FFmpeg "portable" (imageio-ffmpeg) y pre-encode a Opus
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+            # Importante: usar FFmpegOpusAudio para evitar depender de libopus del sistema
+            source = discord.FFmpegOpusAudio(
+                filename,
+                executable=ffmpeg_path,
+                options='-filter:a "volume=2.0"'
+            )
+            vc.play(source)
+
             while vc.is_playing():
                 await asyncio.sleep(0.2)
             await asyncio.sleep(0.2)
