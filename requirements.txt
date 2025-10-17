@@ -7,3 +7,4 @@ setuptools
 wheel
 psycopg2-binary
 SQLAlchemy
+imageio-ffmpeg
