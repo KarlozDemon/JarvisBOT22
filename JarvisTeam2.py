@@ -4,12 +4,15 @@ import random
 import asyncio
 import unicodedata
 from datetime import datetime
+from time import time
 import pytz
 import discord
 import edge_tts
 from flask import Flask
 import threading
 import imageio_ffmpeg
+import hashlib
+from pathlib import Path
 
 # Slash commands
 from discord import app_commands
@@ -189,7 +192,7 @@ def obtener_frase_bienvenida(nombre, veces):
         frases += [
             f"{nombre}, qué bueno verte de nuevo. Segunda vez hoy.",
             f"{nombre}, parece que te gustó estar aquí. Segunda vez hoy.",
-            f"¡Bienvenido otra vez, {nombre}! Nos alegra verte de vuelta.",
+            f"¡Bienvenido otra vez, {nombre}}! Nos alegra verte de vuelta.",
             f"¡Nos volvemos a encontrar, {nombre}! {saludo}.",
             f"{nombre}, ya viniste dos veces hoy. ¡Qué alegría!",
             f"Re bienvenido, {nombre}! Ya es tu segunda vez hoy.",
@@ -297,6 +300,29 @@ def obtener_frase_despedida(nombre):
     ]
     return random.choice(frases)
 
+# ========================== MEJORAS: 1) Debounce, 3) Límite TTS, 4) Caché, 6) Batch =====
+
+# 1) Debounce anti-spam (evita hablar si el mismo user dispara eventos muy seguidos)
+ULTIMO_EVENTO = {}  # {(guild_id, user_id): timestamp}
+MIN_GAP_S = 3.0     # segundos
+
+# 3) Límite global de TTS concurrentes (para no saturar)
+MAX_TTS_CONCURRENT = int(os.getenv("MAX_TTS_CONCURRENT", "3"))
+TTS_SEM = asyncio.Semaphore(MAX_TTS_CONCURRENT)
+
+# 4) Caché de TTS en disco (si se repite el mismo texto+voz, reutiliza el MP3)
+CACHE_DIR = Path("./tts_cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
+def tts_cache_path(texto: str, voice: str = "es-ES-ElviraNeural") -> Path:
+    h = hashlib.sha256((voice + "|" + texto).encode("utf-8")).hexdigest()[:32]
+    return CACHE_DIR / f"{h}.mp3"
+
+# 6) Batch de saludos cuando entra mucha gente junta
+BATCH_JOIN = {}   # { (guild_id, channel_id): {"nombres": set(), "user_ids": set(), "timer": task} }
+BATCH_WINDOW_S = 1.5  # segundos para agrupar
+BATCH_UMBRAL = 4      # a partir de cuánta gente en el canal hacemos saludo conjunto
+
 # ========================== AUDIO (TTS) =======================================
 guild_locks = {}
 entradas_usuarios = {}
@@ -346,26 +372,33 @@ async def ensure_connected(target_channel: discord.VoiceChannel):
                 return None
 
 async def play_audio(vc, text):
+    """Reproduce audio TTS en un guild a la vez (lock por guild),
+    usando caché y limitando la generación TTS concurrente global."""
     if vc.guild.id not in guild_locks:
         guild_locks[vc.guild.id] = asyncio.Lock()
     lock = guild_locks[vc.guild.id]
-    filename = f"tts_{vc.guild.id}.mp3"
+
+    voice_id = "es-ES-ElviraNeural"
+    cache_file = tts_cache_path(text, voice_id)
+
     try:
         async with lock:
             print(f"[AUDIO] {vc.guild.name}: {text}")
+
+            # Genera TTS si no existe en caché (limitado por semáforo global)
+            if not cache_file.exists():
+                async with TTS_SEM:
+                    communicate = edge_tts.Communicate(text, voice=voice_id)
+                    await communicate.save(str(cache_file))
+
+            # Si estaba reproduciendo algo, córtalo
             if vc.is_playing():
                 vc.stop()
 
-            # 1) Generar MP3 con edge-tts
-            communicate = edge_tts.Communicate(text, voice="es-ES-ElviraNeural")
-            await communicate.save(filename)
-
-            # 2) Usar FFmpeg "portable" (imageio-ffmpeg) y pre-encode a Opus
+            # Usar FFmpeg portable + opus
             ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-
-            # Importante: usar FFmpegOpusAudio para evitar depender de libopus del sistema
             source = discord.FFmpegOpusAudio(
-                filename,
+                str(cache_file),
                 executable=ffmpeg_path,
                 options='-filter:a "volume=2.0"'
             )
@@ -374,14 +407,9 @@ async def play_audio(vc, text):
             while vc.is_playing():
                 await asyncio.sleep(0.2)
             await asyncio.sleep(0.2)
+
     except Exception as e:
         print(f"[ERROR] Reproduciendo audio: {e}")
-    finally:
-        try:
-            if os.path.exists(filename):
-                os.remove(filename)
-        except Exception as e:
-            print(f"[ERROR] No se pudo borrar el archivo temporal {filename}: {e}")
 
 # ========================== DISCORD SETUP Y EVENTOS ============================
 intents = discord.Intents.default()
@@ -495,6 +523,12 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if member.bot:
         return
 
+    # 1) Debounce anti-spam por usuario
+    ahora_ts = time()
+    clave_user = (member.guild.id, member.id)
+    if (t := ULTIMO_EVENTO.get(clave_user)) and (ahora_ts - t < MIN_GAP_S):
+        return
+
     after_ch = after.channel
     before_ch = before.channel
 
@@ -527,14 +561,41 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
         text = obtener_frase_bienvenida(nombre_limpio, veces)
 
+        # 6) Batch si hay mucha gente
         try:
             miembros = list(getattr(after_ch, "members", []))
             num_usuarios = len([m for m in miembros if not m.bot])
-            if num_usuarios >= 20:
-                text = f"¡Wow, esto se está llenando! Bienvenido {nombre_limpio}, y saludos a todos los presentes."
         except Exception:
-            pass
+            num_usuarios = 1
 
+        if num_usuarios >= BATCH_UMBRAL:
+            key_batch = (after_ch.guild.id, after_ch.id)
+            pack = BATCH_JOIN.get(key_batch)
+            if pack is None:
+                async def send_batch(guild_obj, key):
+                    await asyncio.sleep(BATCH_WINDOW_S)
+                    data = BATCH_JOIN.pop(key, None)
+                    if data and data["nombres"]:
+                        lista = ", ".join(sorted(data["nombres"]))
+                        texto_batch = f"¡Bienvenidos {lista}! ¡Pónganse cómodos!"
+                        vc2 = discord.utils.get(bot.voice_clients, guild=guild_obj)
+                        if vc2 and vc2.is_connected():
+                            # marca debounce para todos los usuarios incluidos
+                            ts_now = time()
+                            for uid in data["user_ids"]:
+                                ULTIMO_EVENTO[(guild_obj.id, uid)] = ts_now
+                            await play_audio(vc2, texto_batch)
+
+                BATCH_JOIN[key_batch] = {"nombres": set([nombre_limpio]),
+                                         "user_ids": set([member.id]),
+                                         "timer": asyncio.create_task(send_batch(after_ch.guild, key_batch))}
+            else:
+                pack["nombres"].add(nombre_limpio)
+                pack["user_ids"].add(member.id)
+            return  # no decir saludo individual si estamos en modo batch
+
+        # Saludo individual
+        ULTIMO_EVENTO[clave_user] = time()
         await play_audio(voice_client, text)
 
     # === SALIDA ===
@@ -552,6 +613,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                     text = obtener_frase_despedida(nombre_limpio)
             else:
                 text = f"{nombre_limpio} se ha desconectado. ¡Cuídate!"
+            ULTIMO_EVENTO[clave_user] = time()
             await play_audio(voice_client, text)
 
     # === INICIO DE STREAM ===
@@ -560,6 +622,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             texto = random.choice(frases_inicio_stream).format(nombre=nombre_limpio)
             voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
             if voice_client and voice_client.is_connected():
+                ULTIMO_EVENTO[clave_user] = time()
                 await play_audio(voice_client, texto)
 
     # === FIN DE STREAM ===
@@ -568,6 +631,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             texto = random.choice(frases_fin_stream).format(nombre=nombre_limpio)
             voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
             if voice_client and voice_client.is_connected():
+                ULTIMO_EVENTO[clave_user] = time()
                 await play_audio(voice_client, texto)
 
     # === Desconexión inteligente ===
