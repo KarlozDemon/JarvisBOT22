@@ -23,10 +23,6 @@ DB_FILE = "usuarios_frecuentes.db"
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_FILE}")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-# ========================== CONFIGURACIÓN GENERAL ==============================
-# Ya NO usamos CANALES_OBJETIVO_IDS hardcodeado.
-# Los canales se administran con /canal agregar | quitar | listar y se guardan en DB.
-
 # ========================== TABLAS Y UTILIDADES DE DB ==========================
 def inicializar_db():
     """Crea tablas si no existen (funciona en Postgres y SQLite)."""
@@ -187,7 +183,7 @@ def obtener_frase_bienvenida(nombre, veces):
             f"{nombre}, gracias por unirte. Esperamos que disfrutes tu tiempo.",
             f"{nombre}, esta es tu primera visita hoy. ¡Disfrútala!",
             f"{nombre}, es un gusto saludarte por primera vez.",
-            f"¡Nos alegra contar contigo, {nombre}!",
+            f"¡Nos alegra contar contigo, {nombre}}!",
         ]
     elif veces == 2:
         frases += [
@@ -395,45 +391,86 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -------- Slash commands: /canal (elige canal de voz desde selector) ----------
+# ------------------ helper seguro para responder slash -------------------------
+async def safe_reply(interaction: discord.Interaction, content: str, ephemeral: bool = True):
+    """Evita 'Unknown interaction' usando followup si ya se respondió o si caducó."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content, ephemeral=ephemeral)
+    except discord.NotFound:
+        try:
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        except Exception as e:
+            print(f"[slash] reply falló: {e}")
+
+# -------- Slash commands: /canal (selector) -----------------------------------
 canal_group = app_commands.Group(name="canal", description="Administra canales de voz objetivo")
 
 @canal_group.command(name="agregar", description="Agrega un canal de voz objetivo (selector)")
 @app_commands.describe(canal="Canal de voz")
 @app_commands.default_permissions(manage_channels=True)
 async def canal_agregar(interaction: discord.Interaction, canal: discord.VoiceChannel):
+    await interaction.response.defer(ephemeral=True)
     if not interaction.guild:
-        return await interaction.response.send_message("Este comando solo funciona en servidores.", ephemeral=True)
+        return await interaction.followup.send("Este comando solo funciona en servidores.", ephemeral=True)
     if canal.guild.id != interaction.guild.id:
-        return await interaction.response.send_message("El canal no pertenece a este servidor.", ephemeral=True)
-    agregar_canal(interaction.guild.id, canal.id)
-    await interaction.response.send_message(f"✅ Agregado: **{canal.name}** (`{canal.id}`) a los canales objetivo.", ephemeral=True)
+        return await interaction.followup.send("El canal no pertenece a este servidor.", ephemeral=True)
+    try:
+        agregar_canal(interaction.guild.id, canal.id)
+        await interaction.followup.send(f"✅ Agregado: **{canal.name}** (`{canal.id}`) a los canales objetivo.", ephemeral=True)
+    except Exception as e:
+        print(f"[slash agregar] {e}")
+        await interaction.followup.send("❌ No pude agregar el canal.", ephemeral=True)
 
 @canal_group.command(name="quitar", description="Quita un canal de voz objetivo (selector)")
 @app_commands.describe(canal="Canal de voz")
 @app_commands.default_permissions(manage_channels=True)
 async def canal_quitar(interaction: discord.Interaction, canal: discord.VoiceChannel):
+    await interaction.response.defer(ephemeral=True)
     if not interaction.guild:
-        return await interaction.response.send_message("Este comando solo funciona en servidores.", ephemeral=True)
-    quitar_canal(interaction.guild.id, canal.id)
-    await interaction.response.send_message(f"🗑️ Quitado: **{canal.name}** (`{canal.id}`).", ephemeral=True)
+        return await interaction.followup.send("Este comando solo funciona en servidores.", ephemeral=True)
+    try:
+        quitar_canal(interaction.guild.id, canal.id)
+        await interaction.followup.send(f"🗑️ Quitado: **{canal.name}** (`{canal.id}`).", ephemeral=True)
+    except Exception as e:
+        print(f"[slash quitar] {e}")
+        await interaction.followup.send("❌ No pude quitar el canal.", ephemeral=True)
 
 @canal_group.command(name="listar", description="Lista los canales de voz objetivo")
 @app_commands.default_permissions(manage_channels=True)
 async def canal_listar(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     if not interaction.guild:
-        return await interaction.response.send_message("Este comando solo funciona en servidores.", ephemeral=True)
-    ids = _canales_cache.get(interaction.guild.id) or _cargar_canales_guild(interaction.guild.id)
-    if not ids:
-        return await interaction.response.send_message("No hay canales objetivo configurados para este servidor.", ephemeral=True)
-    lineas = []
-    for cid in sorted(ids):
-        ch = interaction.guild.get_channel(cid)
-        nombre = ch.name if isinstance(ch, discord.VoiceChannel) else "Desconocido/Eliminado"
-        lineas.append(f"- **{nombre}** (`{cid}`)")
-    await interaction.response.send_message("**Canales objetivo:**\n" + "\n".join(lineas), ephemeral=True)
+        return await interaction.followup.send("Este comando solo funciona en servidores.", ephemeral=True)
+    try:
+        ids = _canales_cache.get(interaction.guild.id) or _cargar_canales_guild(interaction.guild.id)
+        if not ids:
+            return await interaction.followup.send("No hay canales objetivo configurados para este servidor.", ephemeral=True)
+        lineas = []
+        for cid in sorted(ids):
+            ch = interaction.guild.get_channel(cid)
+            nombre = ch.name if isinstance(ch, discord.VoiceChannel) else "Desconocido/Eliminado"
+            lineas.append(f"- **{nombre}** (`{cid}`)")
+        await interaction.followup.send("**Canales objetivo:**\n" + "\n".join(lineas), ephemeral=True)
+    except Exception as e:
+        print(f"[slash listar] {e}")
+        await interaction.followup.send("❌ Ocurrió un error listando los canales.", ephemeral=True)
 
 bot.tree.add_command(canal_group)
+
+# (opcional) manejador global de errores de slash
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: Exception):
+    print(f"[app_commands error] {type(error).__name__}: {error}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send("❌ Ocurrió un error con el comando.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Ocurrió un error con el comando.", ephemeral=True)
+    except Exception:
+        pass
 
 @bot.event
 async def on_ready():
