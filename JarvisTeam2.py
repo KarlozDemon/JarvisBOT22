@@ -400,7 +400,7 @@ canal_group = app_commands.Group(name="canal", description="Administra canales d
 
 @canal_group.command(name="agregar", description="Agrega un canal de voz objetivo (selector)")
 @app_commands.describe(canal="Canal de voz")
-@app_commands.default_member_permissions(manage_channels=True)
+@app_commands.default_permissions(manage_channels=True)
 async def canal_agregar(interaction: discord.Interaction, canal: discord.VoiceChannel):
     if not interaction.guild:
         return await interaction.response.send_message("Este comando solo funciona en servidores.", ephemeral=True)
@@ -411,7 +411,7 @@ async def canal_agregar(interaction: discord.Interaction, canal: discord.VoiceCh
 
 @canal_group.command(name="quitar", description="Quita un canal de voz objetivo (selector)")
 @app_commands.describe(canal="Canal de voz")
-@app_commands.default_member_permissions(manage_channels=True)
+@app_commands.default_permissions(manage_channels=True)
 async def canal_quitar(interaction: discord.Interaction, canal: discord.VoiceChannel):
     if not interaction.guild:
         return await interaction.response.send_message("Este comando solo funciona en servidores.", ephemeral=True)
@@ -419,7 +419,7 @@ async def canal_quitar(interaction: discord.Interaction, canal: discord.VoiceCha
     await interaction.response.send_message(f"🗑️ Quitado: **{canal.name}** (`{canal.id}`).", ephemeral=True)
 
 @canal_group.command(name="listar", description="Lista los canales de voz objetivo")
-@app_commands.default_member_permissions(manage_channels=True)
+@app_commands.default_permissions(manage_channels=True)
 async def canal_listar(interaction: discord.Interaction):
     if not interaction.guild:
         return await interaction.response.send_message("Este comando solo funciona en servidores.", ephemeral=True)
