@@ -183,7 +183,7 @@ def obtener_frase_bienvenida(nombre, veces):
             f"{nombre}, gracias por unirte. Esperamos que disfrutes tu tiempo.",
             f"{nombre}, esta es tu primera visita hoy. ¡Disfrútala!",
             f"{nombre}, es un gusto saludarte por primera vez.",
-            f"¡Nos alegra contar contigo, {nombre}}!",
+            f"¡Nos alegra contar contigo, {nombre}!",
         ]
     elif veces == 2:
         frases += [
