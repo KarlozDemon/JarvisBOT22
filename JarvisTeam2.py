@@ -192,7 +192,7 @@ def obtener_frase_bienvenida(nombre, veces):
         frases += [
             f"{nombre}, qué bueno verte de nuevo. Segunda vez hoy.",
             f"{nombre}, parece que te gustó estar aquí. Segunda vez hoy.",
-            f"¡Bienvenido otra vez, {nombre}}! Nos alegra verte de vuelta.",
+            f"¡Bienvenido otra vez, {nombre}! Nos alegra verte de vuelta.",
             f"¡Nos volvemos a encontrar, {nombre}! {saludo}.",
             f"{nombre}, ya viniste dos veces hoy. ¡Qué alegría!",
             f"Re bienvenido, {nombre}! Ya es tu segunda vez hoy.",
