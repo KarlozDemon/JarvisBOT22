@@ -390,7 +390,7 @@ intents.guilds = True
 intents.members = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.AutoShardedBot(command_prefix="!", intents=intents)
 
 # ------------------ helper seguro para responder slash -------------------------
 async def safe_reply(interaction: discord.Interaction, content: str, ephemeral: bool = True):
