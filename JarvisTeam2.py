@@ -1,109 +1,78 @@
-import os
-import re
-import random
-import asyncio
-import unicodedata
-from datetime import datetime
-from time import time
-import pytz
 import discord
 import edge_tts
+import asyncio
+import os
+import re
+import unicodedata
+import random
+import pytz
 from flask import Flask
 import threading
-import imageio_ffmpeg
-import hashlib
+from datetime import datetime
+import json
 from pathlib import Path
 
-# Slash commands
-from discord import app_commands
-from discord.ext import commands
+# ========================== CONFIGURACIÓN GENERAL ==============================
+CANALES_OBJETIVO_IDS = [
+    1383150389037367487, # Pride Battle - Clan1 Voz
+    1375567307782357047, # PiscoSour™ - Team1 Voz
+    1289380412434681879, # NyxLeyendasWT - CopaSoftnyx
+]
 
-# ======== DB: SQLAlchemy (SQLite local si no hay DATABASE_URL; Postgres si hay) ========
-from sqlalchemy import create_engine, text
+datos_db = {}
+db_lock = threading.Lock()
 
-# Si no configuras DATABASE_URL, usará un SQLite local (se pierde al redeploy en Render Free)
-DB_FILE = "usuarios_frecuentes.db"
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_FILE}")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+# ========================== UTILIDADES Y DATOS PERSISTENTES ====================
 
-# ========================== TABLAS Y UTILIDADES DE DB ==========================
 def inicializar_db():
-    """Crea tablas si no existen (funciona en Postgres y SQLite)."""
-    with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS usuarios_frecuentes (
-                guild_id BIGINT,
-                user_id BIGINT,
-                veces INTEGER,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS canales_objetivo (
-                guild_id BIGINT,
-                channel_id BIGINT,
-                PRIMARY KEY (guild_id, channel_id)
-            )
-        """))
+    """Sistema JSON - Sin Database"""
+    global datos_db
+    archivo_db = Path("usuarios_frecuentes.json")
+    
+    try:
+        if archivo_db.exists():
+            with open(archivo_db, 'r', encoding='utf-8') as f:
+                datos_db = json.load(f)
+            print("✅ JSON cargado correctamente")
+        else:
+            datos_db = {}  # { "guild123": { "user456": 5 } }
+            print("📝 JSON creado nuevo")
+    except Exception as e:
+        print(f"⚠️ Error JSON: {e}")
+        datos_db = {}
 
 def obtener_veces_usuario(guild_id, user_id):
-    with engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT veces FROM usuarios_frecuentes WHERE guild_id=:g AND user_id=:u"),
-            {"g": guild_id, "u": user_id},
-        ).fetchone()
-        return row[0] if row else 0
+    global datos_db
+    with db_lock:
+        guild_data = datos_db.get(str(guild_id), {})
+        return guild_data.get(str(user_id), 0)
 
 def incrementar_veces_usuario(guild_id, user_id):
-    veces = obtener_veces_usuario(guild_id, user_id) + 1
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO usuarios_frecuentes (guild_id, user_id, veces)
-            VALUES (:g, :u, :v)
-            ON CONFLICT (guild_id, user_id) DO UPDATE SET veces = EXCLUDED.veces
-        """), {"g": guild_id, "u": user_id, "v": veces})
-    return veces
-
-# ---- canales dinámicos por servidor
-_canales_cache = {}  # { guild_id: set(channel_ids) }
-
-def _cargar_canales_guild(guild_id: int):
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text("SELECT channel_id FROM canales_objetivo WHERE guild_id=:g"),
-            {"g": guild_id},
-        ).fetchall()
-    ids = {r[0] for r in rows}
-    _canales_cache[guild_id] = ids
-    return ids
-
-def canal_es_objetivo(guild_id: int, channel_id: int) -> bool:
-    ids = _canales_cache.get(guild_id)
-    if ids is None:
-        ids = _cargar_canales_guild(guild_id)
-    return channel_id in ids
-
-def agregar_canal(guild_id: int, channel_id: int):
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO canales_objetivo (guild_id, channel_id)
-            VALUES (:g, :c)
-            ON CONFLICT (guild_id, channel_id) DO NOTHING
-        """), {"g": guild_id, "c": channel_id})
-    _canales_cache.setdefault(guild_id, set()).add(channel_id)
-
-def quitar_canal(guild_id: int, channel_id: int):
-    with engine.begin() as conn:
-        conn.execute(
-            text("DELETE FROM canales_objetivo WHERE guild_id=:g AND channel_id=:c"),
-            {"g": guild_id, "c": channel_id},
-        )
-    _canales_cache.setdefault(guild_id, set()).discard(channel_id)
+    global datos_db
+    with db_lock:
+        guild_str = str(guild_id)
+        user_str = str(user_id)
+        
+        if guild_str not in datos_db:
+            datos_db[guild_str] = {}
+        if user_str not in datos_db[guild_str]:
+            datos_db[guild_str][user_str] = 0
+            
+        datos_db[guild_str][user_str] += 1
+        veces = datos_db[guild_str][user_str]
+        
+        # Guardar cada 10 cambios
+        if veces % 10 == 0:
+            pass
+            
+        return veces
 
 # ========================== FUNCIONES DE TEXTO Y SALUDOS =======================
+
+# CAMBIO: llaves en minúsculas para que el .lower() matchee
 NOMBRES_ESPECIALES = {
     "josé is back": "José",
-    "jᴏꜱᴇ ɪꜱ ʙᴀᴄᴋ": "José"
+    "jᴏꜱᴇ ɪꜱ ʙᴀᴄᴋ": "José" 
 }
 
 frases_rapida = [
@@ -130,23 +99,31 @@ frases_inicio_stream = [
 frases_fin_stream = [
     "{nombre} apagó el stream, ¿será que perdió la partida?",
     "Fin de la transmisión de {nombre}. ¿GG o FF?",
-    "¡Listo! {nombre} dejó de compartir, todos a esperar el próximo en vivo.",
-    "{nombre} terminó el streaming, ¿qué opinan: juega o no juega?",
-    "¡Se acabó el espectáculo! {nombre} cortó transmisión.",
+    "¡Listo! {nombre} dejo de compartir, todos a esperar el próximo en vivo.",
+    "{nombre} terminó el streaming, que opinan juega o no juega.",
+    "¡Se acabó el espectáculo! {nombre} corto trasmisión.",
 ]
-
+ 
 def limpiar_nombre(nombre):
+    # CAMBIO: usar clave en lower para casos especiales
     clave = nombre.lower()
     if clave in NOMBRES_ESPECIALES:
         return NOMBRES_ESPECIALES[clave]
+
+    # Paso 1: Normaliza el nombre a NFKC
     nombre = unicodedata.normalize('NFKC', nombre)
+
+    # Paso 2: Elimina símbolos, emojis y puntuación, deja solo letras y números
     limpio = ""
     for c in nombre:
         categoria = unicodedata.category(c)
         if categoria.startswith('L') or categoria.startswith('N') or c.isspace():
             limpio += c
+    # Paso 3: Remueve espacios repetidos y capitaliza por palabra
     limpio = ' '.join(limpio.split())
     limpio = ' '.join(word.capitalize() for word in limpio.split())
+
+    # Paso 4: Si queda vacío o muy corto, usa un apodo neutro
     if len(limpio) <= 2:
         return "Invitado"
     return limpio
@@ -155,11 +132,23 @@ def obtener_saludo_por_hora():
     zona_horaria = pytz.timezone('America/Lima')
     hora = datetime.now(zona_horaria).hour
     if 5 <= hora < 12:
-        saludos = ["Buenos días", "¡Muy buenos días!", "¡Feliz mañana!"]
+        saludos = [
+            "Buenos días",
+            "¡Muy buenos días!",
+            "¡Feliz mañana!",
+        ]
     elif 12 <= hora < 19:
-        saludos = ["Buenas tardes", "¡Excelente tarde!", "¡Feliz tarde!"]
+        saludos = [
+            "Buenas tardes",
+            "¡Excelente tarde!",
+            "¡Feliz tarde!",
+        ]
     else:
-        saludos = ["Buenas noches", "¡Linda noche!", "¡Que descanses adiós!"]
+        saludos = [
+            "Buenas noches",
+            "¡Linda noche!",
+            "¡Que descanses adiós!", 
+       ]
     return random.choice(saludos)
 
 def obtener_frase_bienvenida(nombre, veces):
@@ -172,7 +161,7 @@ def obtener_frase_bienvenida(nombre, veces):
         frases.append(f"¡{nombre}, ya es viernes! A relajarse.")
     elif dia_semana == "sunday":
         frases.append(f"¡{nombre}, aprovecha este domingo para descansar!")
-    saludo = obtener_saludo_por_hora()
+    saludo = obtener_saludo_por_hora() 
     if veces == 1:
         frases += [
             f"¡Bienvenido, {nombre}! Es tu primera vez hoy. {saludo}.",
@@ -202,7 +191,7 @@ def obtener_frase_bienvenida(nombre, veces):
             f"{nombre}, bienvenido a este lugar.",
             f"{nombre}, parece que disfrutas tu tiempo aquí.",
             f"¡Qué gusto tenerte de nuevo, {nombre}!",
-        ]
+        ]      
     elif veces == 3:
         frases += [
             f"{nombre}! Bienvenido otra vez.",
@@ -225,14 +214,14 @@ def obtener_frase_bienvenida(nombre, veces):
             f"{nombre}, esta es tu visita número {veces} hoy. ¡Increíble!",
             f"{nombre}, parece que este canal es tu favorito. {veces} visitas hoy.",
             f"¡Qué alegría verte tantas veces, {nombre}!",
-            f"{nombre}, gracias por visitarnos de nuevo!",
+            f"{nombre}, gracias por visitarnos de nuevo.",
             f"{nombre}, tu energía es contagiosa. ¡Gracias por volver!",
             f"{nombre}, tu presencia siempre suma. {saludo}.",
             f"{nombre}, eres siempre bienvenido, no importa cuántas veces vengas.",
             f"{nombre}, se nota que te gusta estar aquí.",
             f"{nombre}, nos encanta verte tan seguido.",
             f"{nombre}, qué gusto que vengas tantas veces.",
-            f"{nombre}, tu constancia se agradece mucho.",
+            f"{nombre}, tu constancia se agradece mucho.",    
         ]
     frases += [
         f"{nombre}, qué alegría tenerte aquí. {saludo}.",
@@ -300,39 +289,18 @@ def obtener_frase_despedida(nombre):
     ]
     return random.choice(frases)
 
-# ========================== MEJORAS: 1) Debounce, 3) Límite TTS, 4) Caché, 6) Batch =====
+# ========================== FUNCIONES DE AUDIO (TTS) ===========================
 
-# 1) Debounce anti-spam (evita hablar si el mismo user dispara eventos muy seguidos)
-ULTIMO_EVENTO = {}  # {(guild_id, user_id): timestamp}
-MIN_GAP_S = 3.0     # segundos
-
-# 3) Límite global de TTS concurrentes (para no saturar)
-MAX_TTS_CONCURRENT = int(os.getenv("MAX_TTS_CONCURRENT", "3"))
-TTS_SEM = asyncio.Semaphore(MAX_TTS_CONCURRENT)
-
-# 4) Caché de TTS en disco (si se repite el mismo texto+voz, reutiliza el MP3)
-CACHE_DIR = Path("./tts_cache")
-CACHE_DIR.mkdir(exist_ok=True)
-
-def tts_cache_path(texto: str, voice: str = "es-ES-ElviraNeural") -> Path:
-    h = hashlib.sha256((voice + "|" + texto).encode("utf-8")).hexdigest()[:32]
-    return CACHE_DIR / f"{h}.mp3"
-
-# 6) Batch de saludos cuando entra mucha gente junta
-BATCH_JOIN = {}   # { (guild_id, channel_id): {"nombres": set(), "user_ids": set(), "timer": task} }
-BATCH_WINDOW_S = 1.5  # segundos para agrupar
-BATCH_UMBRAL = 4      # a partir de cuánta gente en el canal hacemos saludo conjunto
-
-# ========================== AUDIO (TTS) =======================================
 guild_locks = {}
 entradas_usuarios = {}
 
-# Carga explícita de libopus (no es crítico si falla)
+# NUEVO: carga explícita de libopus para evitar errores en algunos entornos
 try:
     discord.opus.load_opus("libopus.so.0")
 except Exception as e:
     print(f"[WARN] No pude cargar libopus: {e}")
 
+# NUEVO: lock por GUILD + helper de conexión robusta
 guild_connect_locks = {}
 
 async def ensure_connected(target_channel: discord.VoiceChannel):
@@ -372,186 +340,88 @@ async def ensure_connected(target_channel: discord.VoiceChannel):
                 return None
 
 async def play_audio(vc, text):
-    """Reproduce audio TTS en un guild a la vez (lock por guild),
-    usando caché y limitando la generación TTS concurrente global."""
     if vc.guild.id not in guild_locks:
         guild_locks[vc.guild.id] = asyncio.Lock()
     lock = guild_locks[vc.guild.id]
-
-    voice_id = "es-ES-ElviraNeural"
-    cache_file = tts_cache_path(text, voice_id)
-
+    filename = f"tts_{vc.guild.id}.mp3"
     try:
         async with lock:
             print(f"[AUDIO] {vc.guild.name}: {text}")
-
-            # Genera TTS si no existe en caché (limitado por semáforo global)
-            if not cache_file.exists():
-                async with TTS_SEM:
-                    communicate = edge_tts.Communicate(text, voice=voice_id)
-                    await communicate.save(str(cache_file))
-
-            # Si estaba reproduciendo algo, córtalo
+            # CAMBIO: cortar audio previo para evitar procesos ffmpeg zombis
             if vc.is_playing():
                 vc.stop()
 
-            # Usar FFmpeg portable + opus
-            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-            source = discord.FFmpegOpusAudio(
-                str(cache_file),
-                executable=ffmpeg_path,
-                options='-filter:a "volume=2.0"'
-            )
-            vc.play(source)
-
+            communicate = edge_tts.Communicate(text, voice="es-ES-ElviraNeural")
+            await communicate.save(filename)
+            vc.play(discord.FFmpegPCMAudio(filename, executable="ffmpeg", options='-filter:a "volume=2.0"'))
+            # CAMBIO: espera en intervalos cortos
             while vc.is_playing():
                 await asyncio.sleep(0.2)
             await asyncio.sleep(0.2)
-
     except Exception as e:
         print(f"[ERROR] Reproduciendo audio: {e}")
+    finally:
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+        except Exception as e:
+            print(f"[ERROR] No se pudo borrar el archivo temporal {filename}: {e}")
 
 # ========================== DISCORD SETUP Y EVENTOS ============================
+
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.guilds = True
 intents.members = True
-intents.message_content = True
 
-bot = commands.AutoShardedBot(command_prefix="!", intents=intents)
-
-# ------------------ helper seguro para responder slash -------------------------
-async def safe_reply(interaction: discord.Interaction, content: str, ephemeral: bool = True):
-    """Evita 'Unknown interaction' usando followup si ya se respondió o si caducó."""
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(content, ephemeral=ephemeral)
-        else:
-            await interaction.response.send_message(content, ephemeral=ephemeral)
-    except discord.NotFound:
-        try:
-            await interaction.followup.send(content, ephemeral=ephemeral)
-        except Exception as e:
-            print(f"[slash] reply falló: {e}")
-
-# -------- Slash commands: /canal (selector) -----------------------------------
-canal_group = app_commands.Group(name="canal", description="Administra canales de voz objetivo")
-
-@canal_group.command(name="agregar", description="Agrega un canal de voz objetivo (selector)")
-@app_commands.describe(canal="Canal de voz")
-@app_commands.default_permissions(manage_channels=True)
-async def canal_agregar(interaction: discord.Interaction, canal: discord.VoiceChannel):
-    await interaction.response.defer(ephemeral=True)
-    if not interaction.guild:
-        return await interaction.followup.send("Este comando solo funciona en servidores.", ephemeral=True)
-    if canal.guild.id != interaction.guild.id:
-        return await interaction.followup.send("El canal no pertenece a este servidor.", ephemeral=True)
-    try:
-        agregar_canal(interaction.guild.id, canal.id)
-        await interaction.followup.send(f"✅ Agregado: **{canal.name}** (`{canal.id}`) a los canales objetivo.", ephemeral=True)
-    except Exception as e:
-        print(f"[slash agregar] {e}")
-        await interaction.followup.send("❌ No pude agregar el canal.", ephemeral=True)
-
-@canal_group.command(name="quitar", description="Quita un canal de voz objetivo (selector)")
-@app_commands.describe(canal="Canal de voz")
-@app_commands.default_permissions(manage_channels=True)
-async def canal_quitar(interaction: discord.Interaction, canal: discord.VoiceChannel):
-    await interaction.response.defer(ephemeral=True)
-    if not interaction.guild:
-        return await interaction.followup.send("Este comando solo funciona en servidores.", ephemeral=True)
-    try:
-        quitar_canal(interaction.guild.id, canal.id)
-        await interaction.followup.send(f"🗑️ Quitado: **{canal.name}** (`{canal.id}`).", ephemeral=True)
-    except Exception as e:
-        print(f"[slash quitar] {e}")
-        await interaction.followup.send("❌ No pude quitar el canal.", ephemeral=True)
-
-@canal_group.command(name="listar", description="Lista los canales de voz objetivo")
-@app_commands.default_permissions(manage_channels=True)
-async def canal_listar(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    if not interaction.guild:
-        return await interaction.followup.send("Este comando solo funciona en servidores.", ephemeral=True)
-    try:
-        ids = _canales_cache.get(interaction.guild.id) or _cargar_canales_guild(interaction.guild.id)
-        if not ids:
-            return await interaction.followup.send("No hay canales objetivo configurados para este servidor.", ephemeral=True)
-        lineas = []
-        for cid in sorted(ids):
-            ch = interaction.guild.get_channel(cid)
-            nombre = ch.name if isinstance(ch, discord.VoiceChannel) else "Desconocido/Eliminado"
-            lineas.append(f"- **{nombre}** (`{cid}`)")
-        await interaction.followup.send("**Canales objetivo:**\n" + "\n".join(lineas), ephemeral=True)
-    except Exception as e:
-        print(f"[slash listar] {e}")
-        await interaction.followup.send("❌ Ocurrió un error listando los canales.", ephemeral=True)
-
-bot.tree.add_command(canal_group)
-
-# (opcional) manejador global de errores de slash
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: Exception):
-    print(f"[app_commands error] {type(error).__name__}: {error}")
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send("❌ Ocurrió un error con el comando.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Ocurrió un error con el comando.", ephemeral=True)
-    except Exception:
-        pass
+bot = discord.Client(intents=intents)
 
 @bot.event
 async def on_ready():
-    # Sincroniza los slash commands
-    try:
-        await bot.tree.sync()
-    except Exception as e:
-        print(f"[WARN] No pude sync commands: {e}")
-
-    # Precarga caché de canales por cada guild
-    try:
-        for g in bot.guilds:
-            _cargar_canales_guild(g.id)
-    except Exception as e:
-        print(f"[WARN] Precargando canales: {e}")
-
     print(f"JarvisTeamProSQL está online ✅\nUsuario: {bot.user} | ID: {bot.user.id}")
 
+# CAMBIO: handler reescrito con snapshots, validaciones y ensure_connected
+
+def guardar_datos():
+    """Guardar JSON automáticamente"""
+    global datos_db
+    try:
+        with open("usuarios_frecuentes.json", 'w', encoding='utf-8') as f:
+            json.dump(datos_db, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[ERROR] Guardando JSON: {e}")
+
 @bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+async def on_voice_state_update(member, before, after):
     if member.bot:
         return
 
-    # 1) Debounce anti-spam por usuario
-    ahora_ts = time()
-    clave_user = (member.guild.id, member.id)
-    if (t := ULTIMO_EVENTO.get(clave_user)) and (ahora_ts - t < MIN_GAP_S):
-        return
-
+    # Snapshots de canales (evita carreras)
     after_ch = after.channel
     before_ch = before.channel
 
     nombre_limpio = limpiar_nombre(member.display_name)
     ahora = datetime.now(pytz.timezone("America/Lima"))
 
-    # "me" para verificar permisos
+    # "me" seguro para permisos
     try:
         me = member.guild.me or await member.guild.fetch_member(bot.user.id)
     except Exception:
         me = None
 
-    # === ENTRADA ===
-    if after_ch and canal_es_objetivo(after_ch.guild.id, after_ch.id) and (before_ch != after_ch):
+    # === Evento de ENTRADA ===
+    if after_ch and after_ch.id in CANALES_OBJETIVO_IDS and (before_ch != after_ch):
         if me:
             perms = after_ch.permissions_for(me)
             if not perms.connect or not perms.speak:
                 print(f"[PERMISOS] No puedo conectar/hablar en: {after_ch.name}")
                 return
 
+        # DB
         veces = incrementar_veces_usuario(member.guild.id, member.id)
         print(f"[ENTRADA] {nombre_limpio} entró en {after_ch.name} (veces hoy: {veces})")
 
+        # Conexión/movimiento serializado por guild
         voice_client = await ensure_connected(after_ch)
         if not voice_client:
             print(f"[ERROR] No pude conectar al canal de voz: {after_ch.name}")
@@ -561,45 +431,19 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
         text = obtener_frase_bienvenida(nombre_limpio, veces)
 
-        # 6) Batch si hay mucha gente
+        # Conteo de miembros con protección
         try:
             miembros = list(getattr(after_ch, "members", []))
             num_usuarios = len([m for m in miembros if not m.bot])
+            if num_usuarios >= 20:
+                text = f"¡Wow, esto se está llenando! Bienvenido {nombre_limpio}, y saludos a todos los presentes."
         except Exception:
-            num_usuarios = 1
+            pass
 
-        if num_usuarios >= BATCH_UMBRAL:
-            key_batch = (after_ch.guild.id, after_ch.id)
-            pack = BATCH_JOIN.get(key_batch)
-            if pack is None:
-                async def send_batch(guild_obj, key):
-                    await asyncio.sleep(BATCH_WINDOW_S)
-                    data = BATCH_JOIN.pop(key, None)
-                    if data and data["nombres"]:
-                        lista = ", ".join(sorted(data["nombres"]))
-                        texto_batch = f"¡Bienvenidos {lista}! ¡Pónganse cómodos!"
-                        vc2 = discord.utils.get(bot.voice_clients, guild=guild_obj)
-                        if vc2 and vc2.is_connected():
-                            # marca debounce para todos los usuarios incluidos
-                            ts_now = time()
-                            for uid in data["user_ids"]:
-                                ULTIMO_EVENTO[(guild_obj.id, uid)] = ts_now
-                            await play_audio(vc2, texto_batch)
-
-                BATCH_JOIN[key_batch] = {"nombres": set([nombre_limpio]),
-                                         "user_ids": set([member.id]),
-                                         "timer": asyncio.create_task(send_batch(after_ch.guild, key_batch))}
-            else:
-                pack["nombres"].add(nombre_limpio)
-                pack["user_ids"].add(member.id)
-            return  # no decir saludo individual si estamos en modo batch
-
-        # Saludo individual
-        ULTIMO_EVENTO[clave_user] = time()
         await play_audio(voice_client, text)
 
-    # === SALIDA ===
-    if before_ch and canal_es_objetivo(before_ch.guild.id, before_ch.id) and after_ch != before_ch:
+    # === Evento de SALIDA ===
+    if before_ch and before_ch.id in CANALES_OBJETIVO_IDS and after_ch != before_ch:
         print(f"[SALIDA] {nombre_limpio} salió de {before_ch.name}")
 
         voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
@@ -613,25 +457,27 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                     text = obtener_frase_despedida(nombre_limpio)
             else:
                 text = f"{nombre_limpio} se ha desconectado. ¡Cuídate!"
-            ULTIMO_EVENTO[clave_user] = time()
             await play_audio(voice_client, text)
 
-    # === INICIO DE STREAM ===
-    if after_ch and canal_es_objetivo(after_ch.guild.id, after_ch.id):
+    # === INICIO DE TRANSMISIÓN DE PANTALLA ===
+    if after_ch and after_ch.id in CANALES_OBJETIVO_IDS:
         if not before.self_stream and after.self_stream:
             texto = random.choice(frases_inicio_stream).format(nombre=nombre_limpio)
             voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
             if voice_client and voice_client.is_connected():
-                ULTIMO_EVENTO[clave_user] = time()
                 await play_audio(voice_client, texto)
+            # Si quieres hablar aunque no esté conectado, podrías:
+            # else:
+            #     vc = await ensure_connected(after_ch)
+            #     if vc:
+            #         await play_audio(vc, texto)
 
-    # === FIN DE STREAM ===
-    if before_ch and canal_es_objetivo(before_ch.guild.id, before_ch.id):
+    # === FIN DE TRANSMISIÓN DE PANTALLA ===
+    if before_ch and before_ch.id in CANALES_OBJETIVO_IDS:
         if before.self_stream and not after.self_stream:
             texto = random.choice(frases_fin_stream).format(nombre=nombre_limpio)
             voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
             if voice_client and voice_client.is_connected():
-                ULTIMO_EVENTO[clave_user] = time()
                 await play_audio(voice_client, texto)
 
     # === Desconexión inteligente ===
@@ -661,25 +507,29 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 # ========================== SERVIDOR FLASK KEEP-ALIVE ==========================
 app = Flask(__name__)
 
-@app.route("/")
+@app.route('/')
 def index():
     return "¡Estoy vivo, Render! ✅"
 
-@app.route("/healthz")
-def healthz():
-    return "ok", 200
-
 def run_web():
+    # CAMBIO: usar PORT de entorno si existe (Render Web Service)
     port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port)  # CAMBIO
 
 threading.Thread(target=run_web, daemon=True).start()
 
 # ========================== INICIO DEL BOT =====================================
+
+# Guardar al apagar
+import atexit
+atexit.register(guardar_datos)
+
+print("🚀 Bot listo para iniciar")
+
 if __name__ == "__main__":
     inicializar_db()
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         print("❌ Error: La variable de entorno DISCORD_TOKEN no está definida.")
-        raise SystemExit(1)
+        exit(1)
     bot.run(TOKEN)
