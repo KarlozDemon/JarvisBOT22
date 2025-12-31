@@ -14,9 +14,7 @@ from pathlib import Path
 
 # ========================== CONFIGURACIÓN GENERAL ==============================
 CANALES_OBJETIVO_IDS = [
-    1383150389037367487, # Pride Battle - Clan1 Voz
-    1375567307782357047, # PiscoSour™ - Team1 Voz
-    1289380412434681879, # NyxLeyendasWT - CopaSoftnyx
+    1383150389037367487, # Pride Battle - Clan4 Voz
 ]
 
 datos_db = {}
