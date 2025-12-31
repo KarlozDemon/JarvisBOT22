@@ -481,36 +481,36 @@ async def on_voice_state_update(member, before, after):
                 await play_audio(voice_client, texto)
 
     # === Desconexión inteligente (1 VEZ POR HORA) ===
-voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
-if voice_client and voice_client.is_connected() and voice_client.channel:
-    vc_channel = voice_client.channel
-    gid = member.guild.id  # ← NUEVO
+    voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
+    if voice_client and voice_client.is_connected() and voice_client.channel:
+        vc_channel = voice_client.channel
+        gid = member.guild.id  # ← NUEVO
     
-    try:
-        miembros = list(getattr(vc_channel, "members", []))
-    except Exception:
-        miembros = []
-    usuarios_humanos = [m for m in miembros if not m.bot]
-
-    if len(usuarios_humanos) == 1:
-        unico = usuarios_humanos[0]
-        # ANTI-SPAM: Solo 1 vez cada hora
-        ahora = datetime.now().timestamp()  # ← NUEVO
-        ultima = solo_cooldowns.get(gid, 0)  # ← NUEVO
-        
-        if ahora - ultima > 3600:  # 3600s = 1 hora  # ← NUEVO
-            solo_cooldowns[gid] = ahora  # ← NUEVO
-            text = f"{unico.display_name}, parece que ahora estás solo. ¡Aquí sigo contigo!"
-            await play_audio(voice_client, text)
-    elif not usuarios_humanos:
-        text = "Parece que me quedé solito aquí…"
-        await play_audio(voice_client, text)
         try:
-            if voice_client.is_playing():
-                voice_client.stop()
+            miembros = list(getattr(vc_channel, "members", []))
         except Exception:
-            pass
-        await voice_client.disconnect()
+            miembros = []
+        usuarios_humanos = [m for m in miembros if not m.bot]
+
+        if len(usuarios_humanos) == 1:
+            unico = usuarios_humanos[0]
+            # ANTI-SPAM: Solo 1 vez cada hora
+            ahora = datetime.now().timestamp()  # ← NUEVO
+            ultima = solo_cooldowns.get(gid, 0)  # ← NUEVO
+        
+            if ahora - ultima > 3600:  # 3600s = 1 hora  # ← NUEVO
+                solo_cooldowns[gid] = ahora  # ← NUEVO
+                text = f"{unico.display_name}, parece que ahora estás solo. ¡Aquí sigo contigo!"
+                await play_audio(voice_client, text)
+        elif not usuarios_humanos:
+            text = "Parece que me quedé solito aquí…"
+            await play_audio(voice_client, text)
+            try:
+                if voice_client.is_playing():
+                    voice_client.stop()
+            except Exception:
+                pass
+            await voice_client.disconnect()
 
 # ========================== SERVIDOR FLASK KEEP-ALIVE ==========================
 app = Flask(__name__)
