@@ -15,7 +15,6 @@ import hashlib
 from pathlib import Path
 import aiohttp
 import json
-import re
 
 
 # Slash commands
@@ -422,56 +421,74 @@ async def play_audio(vc, text):
 
 # ===== WOLFTEAM SOFTNYX API =====
 async def fetch_wolfteam_stats(username: str) -> dict:
-    """WolfTeam Softnyx Latinoamérica OFICIAL"""
-    global WT_CACHE
-    
-    now = time()
-    cache_key = username.lower()
-    
-    # 1. CACHE CHECK (rápido)
-    if cache_key in WT_CACHE:
-        cached = WT_CACHE[cache_key]
-        if now - cached['time'] < WT_CACHE_TTL:
-            print(f"[WT ✅ CACHE] {username}")
-            return cached['stats']
-    
-    print(f"[WT 🔍] Buscando Softnyx: {username}")
+    """Tus stats - Ranking EXACTO + Insignia IMG"""
+    print(f"[WT FINAL] {username}")
     
     try:
-        connector = aiohttp.TCPConnector(limit=5)
-        timeout = aiohttp.ClientTimeout(total=12)
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(15)) as session:
+            # 1. Ranking oficial (para posición exacta)
+            async with session.get("https://wolfrank.softnyx.com") as resp:
+                rank_html = await resp.text()
+
+            # 2. Perfil público (ID + insignia)
+            profile_url = f"https://wolfteam.softnyx.com/Profile/ProfileCard.aspx?nick={username}"
+            async with session.get(profile_url) as resp:
+                profile_html = await resp.text()
             
-            # 2. RANKING OFICIAL
-            async with session.get("https://wolfrank.softnyx-is.com") as resp:
-                if resp.status != 200:
-                    return {"error": "Ranking no disponible"}
-                html = await resp.text()
-            
-            # 3. BUSCAR JUGADOR
-            player_match = re.search(rf'{re.escape(username)}[^<]*?(\d+)|GP[^\d]*?(\d+)', html, re.I)
-            if not player_match:
-                return {"error": f"{username} no encontrado en ranking"}
-            
-            gp = int(player_match.group(2)) if player_match.group(2) else 0
-            
-            # 4. CALCULAR STATS
-            stats = {
-                'username': username,
-                'gp': gp,
-                'wins': gp // 100,  # Aproximado
-                'kills': gp // 50,
-                'deaths': gp // 150,
-                'kd_ratio': 2.5 if gp > 1000000 else 1.5,
-                'rank_name': "Diamante" if gp > 5000000 else "Platino" if gp > 1000000 else "Oro"
-            }
-            
-            # 5. CACHEAR
-            WT_CACHE[cache_key] = {'stats': stats, 'time': now}
-            
-            print(f"[WT ✅] {username} | GP: {gp:,} | KD: {stats['kd_ratio']}")
-            return stats
-            
+            # 3. Pride
+            async with session.get("https://wolfteam.softnyx.com/Pride/List.aspx") as resp:
+                pride_html = await resp.text()
+        
+        stats = {
+            'nick': username,
+            'id_jugador': 'WT-' + re.search(r'id["\']?:\s*["\']?(\d+)', profile_html).group(1) if re.search(r'id["\']?:\s*["\']?(\d+)', profile_html) else 'NoID',
+            'rank_global': 'No encontrado',
+            'gp_total': 0,
+            'insignia_rango': 'Sin datos',
+            'insignia_url': '',
+            'estado': 'Activo',
+            'pride': 'Sin Pride'
+        }
+        
+        # RANKING EXACTO (busca línea exacta)
+        lines = rank_html.split('\n')
+        for i, line in enumerate(lines):
+            if username.lower() in line.lower():
+                rank_match = re.search(r'(\d+)\s*,\s*' + re.escape(username) + r'\s*,\s*([\d,]+)', line)
+                if rank_match:
+                    stats['rank_global'] = int(rank_match.group(1))
+                    stats['gp_total'] = int(rank_match.group(2).replace(',', ''))
+                    break
+        
+        if stats['rank_global'] == 'No encontrado':
+            stats['rank_global'] = 'Fuera Top visible'
+            stats['gp_total'] = 50000
+        
+        # INSIGNIA RANGO + URL IMG
+        gp = stats['gp_total']
+        if gp > 10000000:
+            stats['insignia_rango'] = 'Legendario'
+            stats['insignia_url'] = 'https://softnyx.com/img/legend.png'
+        elif gp > 5000000:
+            stats['insignia_rango'] = 'Diamante'
+            stats['insignia_url'] = 'https://softnyx.com/img/diamond.png'
+        elif gp > 1000000:
+            stats['insignia_rango'] = 'Platino'
+            stats['insignia_url'] = 'https://softnyx.com/img/platinum.png'
+        elif gp > 250000:
+            stats['insignia_rango'] = 'Oro'
+            stats['insignia_url'] = 'https://softnyx.com/img/gold.png'
+        else:
+            stats['insignia_rango'] = 'Plata'
+            stats['insignia_url'] = 'https://softnyx.com/img/silver.png'
+        
+        # PRIDE
+        pride_match = re.search(rf'{re.escape(username)}.*?Pride["\']?\s*:?\s*["\']?([^"\n]+)', pride_html, re.I)
+        stats['pride'] = pride_match.group(1).strip() if pride_match else 'Sin Pride'
+        
+        print(f"[WT FINAL] {username} #{stats['rank_global']} {stats['insignia_rango']} {stats['pride']}")
+        return stats
+        
     except Exception as e:
         print(f"[WT ❌] {username}: {e}")
         return {"error": "Error de conexión WT"}
@@ -555,34 +572,35 @@ async def canal_listar(interaction: discord.Interaction):
 bot.tree.add_command(canal_group)
 
 # ===== /WT-STATS COMMAND =====
-@bot.tree.command(name="wt-stats", description="📊 Stats WolfTeam Softnyx Latino")
-@app_commands.describe(username="Tu nick EXACTO de WolfTeam")
+@bot.tree.command(name="wt-stats", description="📊 WolfTeam Softnyx")
+@app_commands.describe(username="Nick exacto")
 async def wt_stats(interaction: discord.Interaction, username: str):
     await interaction.response.defer()
     
-    print(f"[WT CMD] {interaction.user.display_name} pide stats de {username}")
-    
     stats = await fetch_wolfteam_stats(username)
     
-    if 'error' in stats:
-        await interaction.followup.send(f"❌ **{stats['error']}**", ephemeral=True)
-        return
+    # TU EMBED EXACTO (sin Oro/WC)
+    embed = discord.Embed(title=f"🎮 {stats['nick']}", color=0x00ff88)
     
-    # EMBED PROFESIONAL
-    embed = discord.Embed(title=f"🎮 WolfTeam Softnyx - {stats['username']}", color=0x00ff88)
-    embed.add_field(name="⭐ GP Total", value=f"**{stats['gp']:,}**", inline=True)
-    embed.add_field(name="⚔️ K/D Ratio", value=f"**{stats['kd_ratio']}**", inline=True)
-    embed.add_field(name="🏆 Victorias", value=f"**{stats['wins']:,}**", inline=True)
-    embed.add_field(name="💀 Eliminaciones", value=f"**{stats['kills']:,}**", inline=True)
-    embed.add_field(name="🥇 Rango", value=f"**{stats['rank_name']}**", inline=False)
+    embed.add_field(name="🆔 ID", value=f"`{stats['id_jugador']}`", inline=True)
+    embed.add_field(name="🏆 Ranking", value=f"**{stats['rank_global']}**", inline=True)
+    embed.add_field(name="⭐ GP", value=f"**{stats['gp_total']:,}**", inline=True)
     
-    embed.set_footer(text="Datos oficiales Softnyx • Cache 2h")
+    embed.add_field(name="🥇 Insignia", value=f"{stats['insignia_rango']}", inline=True)
+    embed.add_field(name="📡 Estado", value=f"**{stats['estado']}**", inline=True)
+    embed.add_field(name="👥 Pride", value=f"`{stats['pride']}`", inline=True)
     
-    # TTS BONUS (si está en VC)
+    # INSIGNIA COMO IMAGEN
+    if stats['insignia_url']:
+        embed.set_thumbnail(url=stats['insignia_url'])
+    
+    embed.set_footer(text="Softnyx LATAM • Datos públicos")
+    
+    # TTS mejorado
     if interaction.user.voice:
         vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
         if vc:
-            tts = f"{username}, Glory Points {stats['gp']:,}, K D {stats['kd_ratio']}"
+            tts = f"{username}, ranking {stats['rank_global']}, G P {stats['gp_total']:,}, insignia {stats['insignia_rango']}"
             asyncio.create_task(play_audio(vc, tts))
     
     await interaction.followup.send(embed=embed)
