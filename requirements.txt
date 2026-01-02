@@ -7,3 +7,4 @@ setuptools
 wheel
 SQLAlchemy
 imageio-ffmpeg
+aiohttp==3.9.1
