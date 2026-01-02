@@ -13,9 +13,6 @@ import threading
 import imageio_ffmpeg
 import hashlib
 from pathlib import Path
-import aiohttp
-import json
-
 
 # Slash commands
 from discord import app_commands
@@ -316,10 +313,6 @@ TTS_SEM = asyncio.Semaphore(MAX_TTS_CONCURRENT)
 # 4) Caché de TTS en disco (si se repite el mismo texto+voz, reutiliza el MP3)
 CACHE_DIR = Path("./tts_cache")
 CACHE_DIR.mkdir(exist_ok=True)
-# ===== WOLFTEAM SOFTNYX CACHE =====
-WT_CACHE = {}
-WT_CACHE_FILE = Path("wt_cache.json")
-WT_CACHE_TTL = 7200  # 2 horas
 
 def tts_cache_path(texto: str, voice: str = "es-MX-JorgeNeural") -> Path:
     h = hashlib.sha256((voice + "|" + texto).encode("utf-8")).hexdigest()[:32]
@@ -419,97 +412,6 @@ async def play_audio(vc, text):
     except Exception as e:
         print(f"[ERROR] Reproduciendo audio: {e}")
 
-# 1. WolfTeam Softnyx API
-async def fetch_wolfteam_stats(username: str) -> dict:
-    """WolfTeam stats con CACHE inteligente"""
-    nick_lower = username.lower()
-    
-    # 1. CACHE HIT? (más rápido)
-    if nick_lower in WT_CACHE:
-        data = WT_CACHE[nick_lower]
-        if time() - data.get('timestamp', 0) < WT_CACHE_TTL:
-            print(f"[WT CACHE] {username} desde cache")
-            return data
-        else:
-            print(f"[WT CACHE] {username} expiró")
-    
-    print(f"[WT FETCH] {username}")
-    
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(15)) as session:
-            # Ranking (más flexible)
-            async with session.get("https://wolfrank.softnyx.com") as resp:
-                rank_html = await resp.text()
-
-            # Perfil (mejor regex ID)
-            profile_url = f"https://wolfteam.softnyx.com/Profile/ProfileCard.aspx?nick={username}"
-            async with session.get(profile_url) as resp:
-                profile_html = await resp.text()
-            
-            # Pride
-            async with session.get("https://wolfteam.softnyx.com/Pride/List.aspx") as resp:
-                pride_html = await resp.text()
-        
-        # Extrae ID (regex mejorada)
-        id_match = re.search(r'id["\']?\s*[:=]\s*["\']?(\d+)', profile_html, re.I)
-        player_id = 'WT-' + id_match.group(1) if id_match else 'NoID'
-        
-        # Ranking (más flexible + múltiples patrones)
-        rank_global = 'Fuera Top 500'
-        gp_total = 50000
-        
-        lines = rank_html.split('\n')
-        for line in lines:
-            if username.lower() in line.lower():
-                # Patrón 1: "123, VictorLP, 1,234,567"
-                m1 = re.search(r'(\d+)\s*,\s*' + re.escape(username) + r'\s*,\s*([\d,]+)', line, re.I)
-                # Patrón 2: HTML con nick
-                m2 = re.search(r'rank["\']?\s*[:=]\s*["\']?(\d+)', line, re.I)
-                if m1:
-                    rank_global = int(m1.group(1))
-                    gp_total = int(m1.group(2).replace(',', ''))
-                    break
-                elif m2:
-                    rank_global = int(m2.group(1))
-                    break
-        
-        # Insignias por GP
-        insignia_rango, insignia_url = get_insignia(gp_total)
-        
-        # Pride mejorado
-        pride_match = re.search(rf'{re.escape(username)}.*?Pride["\']?\s*:?\s*["\']?([^"\n,\]]+)', pride_html, re.I)
-        pride = pride_match.group(1).strip() if pride_match else 'Sin Pride'
-        
-        stats = {
-            'nick': username,
-            'id_jugador': player_id,
-            'rank_global': rank_global,
-            'gp_total': gp_total,
-            'insignia_rango': insignia_rango,
-            'insignia_url': insignia_url,
-            'estado': 'Activo',
-            'pride': pride,
-            'timestamp': time()
-        }
-        
-        # GUARDAR EN CACHE
-        WT_CACHE[nick_lower] = stats
-        print(f"[WT ✅] {username} #{rank_global} {insignia_rango}")
-        return stats
-        
-    except Exception as e:
-        print(f"[WT ❌] {username}: {e}")
-        return {"error": "Error conexión", 'nick': username}
-
-def get_insignia(gp: int) -> tuple:
-    """Insignias por GP"""
-    if gp > 10000000: return 'Legendario', 'https://softnyx.com/img/legend.png'
-    elif gp > 5000000: return 'Diamante', 'https://softnyx.com/img/diamond.png'
-    elif gp > 1000000: return 'Platino', 'https://softnyx.com/img/platinum.png'
-    elif gp > 250000: return 'Oro', 'https://softnyx.com/img/gold.png'
-    else: return 'Plata', 'https://softnyx.com/img/silver.png'
-
-
 # ========================== DISCORD SETUP Y EVENTOS ============================
 intents = discord.Intents.default()
 intents.voice_states = True
@@ -587,41 +489,6 @@ async def canal_listar(interaction: discord.Interaction):
         await interaction.followup.send("❌ Ocurrió un error listando los canales.", ephemeral=True)
 
 bot.tree.add_command(canal_group)
-
-# ===== /WT-STATS COMMAND =====
-@bot.tree.command(name="wt-stats", description="📊 WolfTeam Softnyx")
-@app_commands.describe(username="Nick exacto")
-async def wt_stats(interaction: discord.Interaction, username: str):
-    await interaction.response.defer()
-    
-    stats = await fetch_wolfteam_stats(username)
-    
-    # TU EMBED EXACTO (sin Oro/WC)
-    embed = discord.Embed(title=f"🎮 {stats['nick']}", color=0x00ff88)
-    
-    embed.add_field(name="🆔 ID", value=f"`{stats['id_jugador']}`", inline=True)
-    embed.add_field(name="🏆 Ranking", value=f"**{stats['rank_global']}**", inline=True)
-    embed.add_field(name="⭐ GP", value=f"**{stats['gp_total']:,}**", inline=True)
-    
-    embed.add_field(name="🥇 Insignia", value=f"{stats['insignia_rango']}", inline=True)
-    embed.add_field(name="📡 Estado", value=f"**{stats['estado']}**", inline=True)
-    embed.add_field(name="👥 Pride", value=f"`{stats['pride']}`", inline=True)
-    
-    # INSIGNIA COMO IMAGEN
-    if stats['insignia_url']:
-        embed.set_thumbnail(url=stats['insignia_url'])
-    
-    embed.set_footer(text="Softnyx LATAM • Datos públicos")
-    
-    # TTS mejorado
-    if interaction.user.voice:
-        vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
-        if vc:
-            tts = f"{username}, ranking {stats['rank_global']}, G P {stats['gp_total']:,}, insignia {stats['insignia_rango']}"
-            asyncio.create_task(play_audio(vc, tts))
-    
-    await interaction.followup.send(embed=embed)
-    print(f"[WT ✅] Embed enviado para {username}")
 
 # (opcional) manejador global de errores de slash
 @bot.tree.error
@@ -816,15 +683,6 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_web, daemon=True).start()
-
-# Limpiar WT cache al apagar
-def save_wt_cache():
-    try:
-        with open(WT_CACHE_FILE, 'w') as f:
-            json.dump(WT_CACHE, f)
-        print("[WT] Cache guardado")
-    except:
-        pass
 
 # ========================== INICIO DEL BOT =====================================
 if __name__ == "__main__":
