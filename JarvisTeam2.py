@@ -419,79 +419,96 @@ async def play_audio(vc, text):
     except Exception as e:
         print(f"[ERROR] Reproduciendo audio: {e}")
 
-# ===== WOLFTEAM SOFTNYX API =====
+# 1. WolfTeam Softnyx API
 async def fetch_wolfteam_stats(username: str) -> dict:
-    """Tus stats - Ranking EXACTO + Insignia IMG"""
-    print(f"[WT FINAL] {username}")
+    """WolfTeam stats con CACHE inteligente"""
+    nick_lower = username.lower()
+    
+    # 1. CACHE HIT? (más rápido)
+    if nick_lower in WT_CACHE:
+        data = WT_CACHE[nick_lower]
+        if time() - data.get('timestamp', 0) < WT_CACHE_TTL:
+            print(f"[WT CACHE] {username} desde cache")
+            return data
+        else:
+            print(f"[WT CACHE] {username} expiró")
+    
+    print(f"[WT FETCH] {username}")
     
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(15)) as session:
-            # 1. Ranking oficial (para posición exacta)
+            # Ranking (más flexible)
             async with session.get("https://wolfrank.softnyx.com") as resp:
                 rank_html = await resp.text()
 
-            # 2. Perfil público (ID + insignia)
+            # Perfil (mejor regex ID)
             profile_url = f"https://wolfteam.softnyx.com/Profile/ProfileCard.aspx?nick={username}"
             async with session.get(profile_url) as resp:
                 profile_html = await resp.text()
             
-            # 3. Pride
+            # Pride
             async with session.get("https://wolfteam.softnyx.com/Pride/List.aspx") as resp:
                 pride_html = await resp.text()
         
-        stats = {
-            'nick': username,
-            'id_jugador': 'WT-' + re.search(r'id["\']?:\s*["\']?(\d+)', profile_html).group(1) if re.search(r'id["\']?:\s*["\']?(\d+)', profile_html) else 'NoID',
-            'rank_global': 'No encontrado',
-            'gp_total': 0,
-            'insignia_rango': 'Sin datos',
-            'insignia_url': '',
-            'estado': 'Activo',
-            'pride': 'Sin Pride'
-        }
+        # Extrae ID (regex mejorada)
+        id_match = re.search(r'id["\']?\s*[:=]\s*["\']?(\d+)', profile_html, re.I)
+        player_id = 'WT-' + id_match.group(1) if id_match else 'NoID'
         
-        # RANKING EXACTO (busca línea exacta)
+        # Ranking (más flexible + múltiples patrones)
+        rank_global = 'Fuera Top 500'
+        gp_total = 50000
+        
         lines = rank_html.split('\n')
-        for i, line in enumerate(lines):
+        for line in lines:
             if username.lower() in line.lower():
-                rank_match = re.search(r'(\d+)\s*,\s*' + re.escape(username) + r'\s*,\s*([\d,]+)', line)
-                if rank_match:
-                    stats['rank_global'] = int(rank_match.group(1))
-                    stats['gp_total'] = int(rank_match.group(2).replace(',', ''))
+                # Patrón 1: "123, VictorLP, 1,234,567"
+                m1 = re.search(r'(\d+)\s*,\s*' + re.escape(username) + r'\s*,\s*([\d,]+)', line, re.I)
+                # Patrón 2: HTML con nick
+                m2 = re.search(r'rank["\']?\s*[:=]\s*["\']?(\d+)', line, re.I)
+                if m1:
+                    rank_global = int(m1.group(1))
+                    gp_total = int(m1.group(2).replace(',', ''))
+                    break
+                elif m2:
+                    rank_global = int(m2.group(1))
                     break
         
-        if stats['rank_global'] == 'No encontrado':
-            stats['rank_global'] = 'Fuera Top visible'
-            stats['gp_total'] = 50000
+        # Insignias por GP
+        insignia_rango, insignia_url = get_insignia(gp_total)
         
-        # INSIGNIA RANGO + URL IMG
-        gp = stats['gp_total']
-        if gp > 10000000:
-            stats['insignia_rango'] = 'Legendario'
-            stats['insignia_url'] = 'https://softnyx.com/img/legend.png'
-        elif gp > 5000000:
-            stats['insignia_rango'] = 'Diamante'
-            stats['insignia_url'] = 'https://softnyx.com/img/diamond.png'
-        elif gp > 1000000:
-            stats['insignia_rango'] = 'Platino'
-            stats['insignia_url'] = 'https://softnyx.com/img/platinum.png'
-        elif gp > 250000:
-            stats['insignia_rango'] = 'Oro'
-            stats['insignia_url'] = 'https://softnyx.com/img/gold.png'
-        else:
-            stats['insignia_rango'] = 'Plata'
-            stats['insignia_url'] = 'https://softnyx.com/img/silver.png'
+        # Pride mejorado
+        pride_match = re.search(rf'{re.escape(username)}.*?Pride["\']?\s*:?\s*["\']?([^"\n,\]]+)', pride_html, re.I)
+        pride = pride_match.group(1).strip() if pride_match else 'Sin Pride'
         
-        # PRIDE
-        pride_match = re.search(rf'{re.escape(username)}.*?Pride["\']?\s*:?\s*["\']?([^"\n]+)', pride_html, re.I)
-        stats['pride'] = pride_match.group(1).strip() if pride_match else 'Sin Pride'
+        stats = {
+            'nick': username,
+            'id_jugador': player_id,
+            'rank_global': rank_global,
+            'gp_total': gp_total,
+            'insignia_rango': insignia_rango,
+            'insignia_url': insignia_url,
+            'estado': 'Activo',
+            'pride': pride,
+            'timestamp': time()
+        }
         
-        print(f"[WT FINAL] {username} #{stats['rank_global']} {stats['insignia_rango']} {stats['pride']}")
+        # GUARDAR EN CACHE
+        WT_CACHE[nick_lower] = stats
+        print(f"[WT ✅] {username} #{rank_global} {insignia_rango}")
         return stats
         
     except Exception as e:
         print(f"[WT ❌] {username}: {e}")
-        return {"error": "Error de conexión WT"}
+        return {"error": "Error conexión", 'nick': username}
+
+def get_insignia(gp: int) -> tuple:
+    """Insignias por GP"""
+    if gp > 10000000: return 'Legendario', 'https://softnyx.com/img/legend.png'
+    elif gp > 5000000: return 'Diamante', 'https://softnyx.com/img/diamond.png'
+    elif gp > 1000000: return 'Platino', 'https://softnyx.com/img/platinum.png'
+    elif gp > 250000: return 'Oro', 'https://softnyx.com/img/gold.png'
+    else: return 'Plata', 'https://softnyx.com/img/silver.png'
+
 
 # ========================== DISCORD SETUP Y EVENTOS ============================
 intents = discord.Intents.default()
