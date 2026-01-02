@@ -303,12 +303,27 @@ async def voz_loop():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.id == TU_USER_ID and after.channel:  # Owner se conecta
+    if member.id == TU_USER_ID and after.channel:  # ← TÚ entras VC
+        guild = member.guild
+        channel = after.channel
+        
+        # Auto-join si no está conectado
+        vc = discord.utils.get(bot.voice_clients, guild=guild)
+        if not vc:
+            vc = await channel.connect()
+            print(f"✅ Jarvis auto-joined {channel.name}")
+        
+        # Inicia escucha
+        await audio_processor.start_listening(vc)
+        await play_audio(vc, "Escuchando órdenes, jefe")
+        
+        # Desconecta si sales
+    elif member.id == TU_USER_ID and before.channel and not after.channel:
         vc = discord.utils.get(bot.voice_clients, guild=member.guild)
-        if vc and vc.channel == after.channel:
-            await audio_processor.start_listening(vc)
-            await play_audio(vc, "Escuchando órdenes, jefe")
-    
+        if vc:
+            await vc.disconnect()
+            print("👋 Jarvis desconectado")
+
     # Tu código original de bienvenidas aquí (simplificado)
     if member.bot: return
     # ... resto de lógica original ...
