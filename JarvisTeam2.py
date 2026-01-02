@@ -17,7 +17,7 @@ import io
 import wave
 
 # Nuevos imports VOZ
-import whisper
+from faster_whisper import WhisperModel
 from collections import deque
 from typing import Optional
 
@@ -111,7 +111,7 @@ class AudioProcessor:
         if len(audio_bytes) < 8000:
             return None
             
-        segments, _ = model.transcribe(io.BytesIO(audio_bytes), language="es")
+        segments, info = model.transcribe(io.BytesIO(audio_bytes), language="es")
         texto = ' '.join([seg.text.strip() for seg in segments]).strip()
         return texto.lower() if texto else None
 
@@ -280,7 +280,7 @@ async def play_audio(vc, text, timeout=20):
 async def on_ready():
     global model
     print("🔄 Cargando Whisper...")
-    model = whisper.WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     await inicializar_db()
     
     print(f"🤖 Jarvis Voz COMPLETO online | ID: {bot.user.id}")
