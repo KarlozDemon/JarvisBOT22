@@ -33,7 +33,7 @@ DB_FILE = "jarvis.db"
 
 # ========================== BASE DE DATOS ASÍNCRONA ==========================
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILE}"
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, pool_size=5)
+engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 async def inicializar_db():
@@ -100,7 +100,7 @@ class AudioProcessor:
         self.vc = voice_client
         self.vc.listen(self.audio_sink)
         
-    def audio_sink(self, sink, store):
+    def audio_sink(self, sink, store):    # ← 4 espacios desde 'class'
         if sink.input_started:
             self.audio_queue.appendleft(sink.audio_data)
     
