@@ -1,0 +1,12 @@
+discord.py[voice]
+discord-ext-voice-recv
+edge-tts
+flask
+pytz
+vosk
+numpy
+PyNaCl
+google-genai
+python-dotenv
+setuptools
+wheel

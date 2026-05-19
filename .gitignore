@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Entorno
+.env
+venv/
+.venv/
+
+# Vosk model (se descarga en build)
+vosk-model-small-es-0.42/
+vosk-model-small-es-0.42.zip
+
+# Audio temporal
+tts_*.mp3
+
+# Data local
+data/usuarios_frecuentes.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
