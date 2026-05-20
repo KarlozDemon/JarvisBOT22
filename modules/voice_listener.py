@@ -1,6 +1,6 @@
 """
 JARVIS Bot — Escucha de Voz + Speech-to-Text (Vosk)
-Con manejo robusto de errores y auto-recuperación.
+Con monkey-patch para corregir OpusError: corrupted stream.
 """
 import asyncio
 import json
@@ -14,10 +14,82 @@ from pathlib import Path
 import config
 
 # Silenciar logs excesivos de voice_recv
-logging.getLogger('discord.ext.voice_recv').setLevel(logging.WARNING)
+logging.getLogger('discord.ext.voice_recv').setLevel(logging.ERROR)
 
-# Intentar importar voice recv
+# ========================== MONKEY PATCH ========================
+# discord-ext-voice-recv crashea el hilo de audio cuando recibe
+# un paquete Opus corrupto. Este patch lo hace resiliente.
+
+def _apply_voice_recv_patch():
+    """Parcha el decodificador Opus de voice_recv para tolerar errores."""
+    try:
+        from discord.ext.voice_recv import opus as vr_opus
+        original_decode = vr_opus.OpusDecoder._decode_packet
+
+        def safe_decode_packet(self, packet):
+            try:
+                return original_decode(self, packet)
+            except Exception:
+                # Paquete corrupto → ignorar silenciosamente
+                return None
+
+        vr_opus.OpusDecoder._decode_packet = safe_decode_packet
+
+        # También parchar pop_data para manejar None
+        original_pop = vr_opus.OpusDecoder.pop_data
+
+        def safe_pop_data(self):
+            try:
+                result = original_pop(self)
+                return result
+            except Exception:
+                return None
+
+        vr_opus.OpusDecoder.pop_data = safe_pop_data
+
+        # Parchar el router para ignorar None data
+        from discord.ext.voice_recv import router as vr_router
+        original_do_run = vr_router.PacketRouter._do_run
+
+        def safe_do_run(self):
+            while not self._end_event.is_set():
+                try:
+                    if not self._connected.is_set():
+                        self._connected.wait()
+
+                    for ssrc, decoder in list(self._decoders.items()):
+                        try:
+                            while True:
+                                data = decoder.pop_data()
+                                if data is None:
+                                    break
+                                packet, pcm = data
+                                if self._sink and pcm:
+                                    user = self._ssrc_to_user.get(ssrc)
+                                    self._sink.write(user, pcm)
+                        except Exception:
+                            continue
+
+                    self._end_event.wait(0.01)
+                except Exception:
+                    continue
+
+        # Solo parchamos _do_run si la estructura lo permite
+        try:
+            vr_router.PacketRouter._do_run = safe_do_run
+        except Exception:
+            pass
+
+        print("✅ Patch de voice_recv aplicado (anti-crash)")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️ No se pudo parchear voice_recv: {e}")
+
+# ========================== IMPORTS ============================
+
 try:
+    _apply_voice_recv_patch()
     from discord.ext import voice_recv
     VOICE_RECV_AVAILABLE = True
     print("✅ discord-ext-voice-recv disponible")
@@ -25,7 +97,6 @@ except ImportError:
     VOICE_RECV_AVAILABLE = False
     print("⚠️ discord-ext-voice-recv NO disponible — solo comandos por texto")
 
-# Intentar importar Vosk
 try:
     import vosk
     vosk.SetLogLevel(-1)
@@ -35,6 +106,8 @@ except ImportError:
     VOSK_AVAILABLE = False
     print("⚠️ Vosk NO disponible — STT deshabilitado")
 
+
+# ========================== RESAMPLE ============================
 
 def resample_48k_stereo_to_16k_mono(pcm_bytes: bytes) -> bytes:
     """Convierte audio PCM 48kHz stereo a 16kHz mono para Vosk."""
@@ -49,6 +122,8 @@ def resample_48k_stereo_to_16k_mono(pcm_bytes: bytes) -> bytes:
         return b''
 
 
+# ========================== VOICE LISTENER =====================
+
 class VoiceListener:
     def __init__(self, bot, on_command_callback):
         self.bot = bot
@@ -58,7 +133,6 @@ class VoiceListener:
         self.pending_activation = {}
         self._enabled = VOICE_RECV_AVAILABLE and VOSK_AVAILABLE
         self._error_count = 0
-        self._max_errors = 50  # Tolerar errores antes de reiniciar
 
         if self._enabled:
             self._load_model()
@@ -100,7 +174,7 @@ class VoiceListener:
     def create_sink(self):
         if not self.enabled:
             return None
-        self._error_count = 0  # Reset on new sink
+        self._error_count = 0
         return voice_recv.BasicSink(self._on_audio_data)
 
     def _on_audio_data(self, user, data):
@@ -109,7 +183,6 @@ class VoiceListener:
             return
 
         try:
-            # Verificar que data.pcm existe y tiene contenido
             if not hasattr(data, 'pcm') or not data.pcm:
                 return
 
@@ -125,14 +198,12 @@ class VoiceListener:
                     print(f"[STT] {user.display_name}: '{text}'")
                     self._handle_text(user, text)
 
-            # Reset error count on success
             self._error_count = 0
 
         except Exception as e:
             self._error_count += 1
             if self._error_count <= 3:
                 print(f"[VOICE LISTENER ERROR #{self._error_count}] {e}")
-            # Reset recognizer for this user on error
             self.reset_recognizer(user.id)
 
     def _handle_text(self, user, text: str):
