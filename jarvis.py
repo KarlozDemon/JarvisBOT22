@@ -133,6 +133,9 @@ async def on_voice_command(user, text: str):
 
 # ========================== EVENTOS DE DISCORD ====================
 
+# Cooldown para evitar conexiones simultáneas
+_voice_cooldown = {}
+
 @bot.event
 async def on_ready():
     global voice_listener
@@ -151,71 +154,90 @@ async def on_ready():
     else:
         print("🎤 Sistema de escucha por voz: INACTIVO (solo texto)")
 
-    # Auto-unirse a canales de voz que ya tengan gente
+    # Auto-unirse al primer canal con gente (con delay)
+    await asyncio.sleep(3)
     for guild in bot.guilds:
+        vc = discord.utils.get(bot.voice_clients, guild=guild)
+        if vc and vc.is_connected():
+            continue
         for vc_channel in guild.voice_channels:
             humans = [m for m in vc_channel.members if not m.bot]
             if humans:
                 print(f"[AUTO-JOIN] Uniéndose a {vc_channel.name} ({guild.name})")
                 await ensure_connected(vc_channel)
-                break  # Solo un canal por guild
+                break
 
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Solo se usa para unirse/seguir al canal donde haya gente. Sin saludos."""
+    """Unirse/moverse/irse según donde haya gente. Sin saludos."""
     if member.bot:
         return
 
-    after_ch = after.channel
-    before_ch = before.channel
+    guild = member.guild
+    gid = guild.id
 
-    # Alguien entró a un canal → bot se une silenciosamente
-    if after_ch and (before_ch != after_ch):
-        me = member.guild.me
-        if me:
-            perms = after_ch.permissions_for(me)
-            if not perms.connect or not perms.speak:
+    # Cooldown de 3 segundos por guild para evitar conexiones simultáneas
+    import time
+    now = time.time()
+    if gid in _voice_cooldown and (now - _voice_cooldown[gid]) < 3:
+        return
+    _voice_cooldown[gid] = now
+
+    # Esperar un momento para que Discord procese el cambio de estado
+    await asyncio.sleep(1.5)
+
+    vc = discord.utils.get(bot.voice_clients, guild=guild)
+
+    # Caso 1: Bot NO está conectado → unirse donde haya gente
+    if not vc or not vc.is_connected():
+        for voice_ch in guild.voice_channels:
+            humans = [m for m in voice_ch.members if not m.bot]
+            if humans:
+                perms = voice_ch.permissions_for(guild.me)
+                if perms.connect and perms.speak:
+                    print(f"[JOIN] Uniéndose a {voice_ch.name}")
+                    await ensure_connected(voice_ch)
+                return
+        return
+
+    # Caso 2: Bot está conectado → verificar si su canal tiene gente
+    if vc.channel:
+        humans_here = [m for m in vc.channel.members if not m.bot]
+        if humans_here:
+            return  # Hay gente aquí, quedarse
+
+        # Canal vacío → buscar otro canal con gente
+        for voice_ch in guild.voice_channels:
+            if voice_ch.id == vc.channel.id:
+                continue
+            humans = [m for m in voice_ch.members if not m.bot]
+            if humans:
+                try:
+                    await vc.move_to(voice_ch)
+                    print(f"[MOVE] Bot se movió a {voice_ch.name}")
+                    await asyncio.sleep(1)
+                    if voice_listener and voice_listener.enabled:
+                        sink = voice_listener.create_sink()
+                        if sink:
+                            try:
+                                vc.listen(sink)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print(f"[MOVE ERROR] {e}")
                 return
 
-        vc = discord.utils.get(bot.voice_clients, guild=member.guild)
-        if not vc or not vc.is_connected():
-            # Bot no está en ningún canal → unirse
-            await ensure_connected(after_ch)
-        # Si el bot ya está en otro canal, se queda donde está
-
-    # Si el canal del bot se queda vacío → buscar gente o irse
-    vc = discord.utils.get(bot.voice_clients, guild=member.guild)
-    if vc and vc.is_connected() and vc.channel:
-        humans_in_bot_channel = [m for m in vc.channel.members if not m.bot]
-        if not humans_in_bot_channel:
-            # Buscar otro canal con gente
-            for voice_ch in member.guild.voice_channels:
-                humans = [m for m in voice_ch.members if not m.bot]
-                if humans:
-                    try:
-                        await vc.move_to(voice_ch)
-                        print(f"[MOVE] Bot se movió a {voice_ch.name}")
-                        if voice_listener and voice_listener.enabled:
-                            sink = voice_listener.create_sink()
-                            if sink:
-                                try:
-                                    vc.listen(sink)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                    return
-            # No hay nadie en ningún canal → desconectarse
-            print(f"[LEAVE] Nadie en voz — desconectando de {vc.channel.name}")
-            if voice_listener:
-                voice_listener.cleanup_all()
-            try:
-                if vc.is_playing():
-                    vc.stop()
-            except Exception:
-                pass
-            await vc.disconnect()
+        # No hay nadie en ningún canal → desconectarse
+        print(f"[LEAVE] Nadie en voz — desconectando")
+        if voice_listener:
+            voice_listener.cleanup_all()
+        try:
+            if vc.is_playing():
+                vc.stop()
+        except Exception:
+            pass
+        await vc.disconnect()
 
 
 # ========================== COMANDOS POR TEXTO ====================
