@@ -277,8 +277,10 @@ async def _admin(a, p, member, guild, vc_ch):
         await ch.set_permissions(guild.default_role, view_channel=True); return f"Canal {ch.name} visible, señor."
     if a == "set_topic":
         ch = guild.text_channels[0] if guild.text_channels else None
-        if ch: await ch.edit(topic=p.get("topic","")); return f"Tema del canal {ch.name} actualizado, señor."
-        return "No encontré canal de texto."
+        if not ch:
+            return "No encontré canal de texto."
+        await ch.edit(topic=p.get("topic",""))
+        return f"Tema del canal {ch.name} actualizado, señor."
     if a == "set_user_limit":
         ch = command_parser.find_channel(guild, p.get("channel_name",""), discord.ChannelType.voice) if p.get("channel_name") else vc_ch
         if not ch: return "No encontré canal de voz."
@@ -370,12 +372,15 @@ async def _admin(a, p, member, guild, vc_ch):
 
     # === BOT SELF ===
     if a == "bot_status":
-        await guild.me.edit(nick=None)  # trigger presence
+        import discord
+        activity = discord.Game(name=p.get("text", "Vigilando"))
+        await guild.me._state._get_client().change_presence(activity=activity)
         return f"Estado actualizado a: {p.get('text','')}, señor."
     if a == "bot_nick":
         await guild.me.edit(nick=p.get("text","")); return f"Mi nombre cambiado a '{p.get('text','')}', señor."
     if a == "set_volume":
-        v = p.get("volume",100); config.TTS_VOLUME = str(max(0.1, min(5.0, v/100*2)))
+        v = p.get("volume", 100)
+        config.TTS_VOLUME = str(round(max(0.1, min(5.0, v / 100 * 2)), 1))
         return f"Volumen ajustado al {v} por ciento, señor."
     if a == "change_voice":
         if p.get("voice") == "female":
