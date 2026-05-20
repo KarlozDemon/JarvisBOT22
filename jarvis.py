@@ -136,6 +136,16 @@ async def on_voice_command(user, text: str):
 # Cooldown para evitar conexiones simultáneas
 _voice_cooldown = {}
 
+
+def _get_category_voice_channels(guild):
+    """Retorna solo los canales de voz dentro de la categoría configurada."""
+    channels = []
+    for ch in guild.voice_channels:
+        if ch.category_id == config.VOICE_CATEGORY_ID:
+            channels.append(ch)
+    return channels
+
+
 @bot.event
 async def on_ready():
     global voice_listener
@@ -145,6 +155,7 @@ async def on_ready():
 ║  JARVIS Online                                               ║
 ║  Usuario: {bot.user}
 ║  Servidores: {len(bot.guilds)}
+║  Categoría de voz: {config.VOICE_CATEGORY_ID}
 ╚══════════════════════════════════════════════════════════════╝
     """)
 
@@ -160,7 +171,7 @@ async def on_ready():
         vc = discord.utils.get(bot.voice_clients, guild=guild)
         if vc and vc.is_connected():
             continue
-        for vc_channel in guild.voice_channels:
+        for vc_channel in _get_category_voice_channels(guild):
             humans = [m for m in vc_channel.members if not m.bot]
             if humans:
                 print(f"[AUTO-JOIN] Uniéndose a {vc_channel.name} ({guild.name})")
@@ -170,28 +181,36 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Unirse/moverse/irse según donde haya gente. Sin saludos."""
+    """Unirse/moverse/irse SOLO en canales de la categoría asignada."""
     if member.bot:
         return
 
     guild = member.guild
     gid = guild.id
 
-    # Cooldown de 3 segundos por guild para evitar conexiones simultáneas
+    # Solo actuar si el cambio involucra un canal de la categoría
+    after_ch = after.channel
+    before_ch = before.channel
+    after_in_cat = after_ch and after_ch.category_id == config.VOICE_CATEGORY_ID
+    before_in_cat = before_ch and before_ch.category_id == config.VOICE_CATEGORY_ID
+
+    if not after_in_cat and not before_in_cat:
+        return  # No tiene nada que ver con nuestra categoría
+
+    # Cooldown de 3 segundos por guild
     import time
     now = time.time()
     if gid in _voice_cooldown and (now - _voice_cooldown[gid]) < 3:
         return
     _voice_cooldown[gid] = now
 
-    # Esperar un momento para que Discord procese el cambio de estado
     await asyncio.sleep(1.5)
 
     vc = discord.utils.get(bot.voice_clients, guild=guild)
 
-    # Caso 1: Bot NO está conectado → unirse donde haya gente
+    # Caso 1: Bot NO está conectado → unirse donde haya gente en la categoría
     if not vc or not vc.is_connected():
-        for voice_ch in guild.voice_channels:
+        for voice_ch in _get_category_voice_channels(guild):
             humans = [m for m in voice_ch.members if not m.bot]
             if humans:
                 perms = voice_ch.permissions_for(guild.me)
@@ -201,14 +220,14 @@ async def on_voice_state_update(member, before, after):
                 return
         return
 
-    # Caso 2: Bot está conectado → verificar si su canal tiene gente
+    # Caso 2: Bot conectado → verificar si su canal tiene gente
     if vc.channel:
         humans_here = [m for m in vc.channel.members if not m.bot]
         if humans_here:
-            return  # Hay gente aquí, quedarse
+            return
 
-        # Canal vacío → buscar otro canal con gente
-        for voice_ch in guild.voice_channels:
+        # Canal vacío → buscar otro en la categoría
+        for voice_ch in _get_category_voice_channels(guild):
             if voice_ch.id == vc.channel.id:
                 continue
             humans = [m for m in voice_ch.members if not m.bot]
@@ -228,8 +247,8 @@ async def on_voice_state_update(member, before, after):
                     print(f"[MOVE ERROR] {e}")
                 return
 
-        # No hay nadie en ningún canal → desconectarse
-        print(f"[LEAVE] Nadie en voz — desconectando")
+        # No hay nadie en la categoría → desconectarse
+        print(f"[LEAVE] Nadie en la categoría — desconectando")
         if voice_listener:
             voice_listener.cleanup_all()
         try:

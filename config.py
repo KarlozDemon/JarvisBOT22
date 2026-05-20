@@ -27,6 +27,10 @@ VOSK_SAMPLE_RATE = 16000
 # ========================== TIMEZONE =========================
 TIMEZONE = "America/Lima"
 
+# ========================== CATEGORÍA DE VOZ =====================
+# El bot SOLO se conectará a canales dentro de esta categoría
+VOICE_CATEGORY_ID = 1452516307068129331
+
 # ========================== SERVIDOR =========================
 # Flask keep-alive para Render
 FLASK_PORT = int(os.getenv("PORT", "10000"))
