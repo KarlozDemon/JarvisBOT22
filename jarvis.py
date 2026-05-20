@@ -184,7 +184,7 @@ async def on_voice_state_update(member, before, after):
             await ensure_connected(after_ch)
         # Si el bot ya está en otro canal, se queda donde está
 
-    # Si el canal del bot se queda vacío, moverse al canal donde haya gente
+    # Si el canal del bot se queda vacío → buscar gente o irse
     vc = discord.utils.get(bot.voice_clients, guild=member.guild)
     if vc and vc.is_connected() and vc.channel:
         humans_in_bot_channel = [m for m in vc.channel.members if not m.bot]
@@ -196,7 +196,6 @@ async def on_voice_state_update(member, before, after):
                     try:
                         await vc.move_to(voice_ch)
                         print(f"[MOVE] Bot se movió a {voice_ch.name}")
-                        # Re-iniciar escucha después de moverse
                         if voice_listener and voice_listener.enabled:
                             sink = voice_listener.create_sink()
                             if sink:
@@ -207,7 +206,16 @@ async def on_voice_state_update(member, before, after):
                     except Exception:
                         pass
                     return
-            # No hay nadie en ningún canal → el bot se queda esperando
+            # No hay nadie en ningún canal → desconectarse
+            print(f"[LEAVE] Nadie en voz — desconectando de {vc.channel.name}")
+            if voice_listener:
+                voice_listener.cleanup_all()
+            try:
+                if vc.is_playing():
+                    vc.stop()
+            except Exception:
+                pass
+            await vc.disconnect()
 
 
 # ========================== COMANDOS POR TEXTO ====================
