@@ -3,10 +3,8 @@
 ║                    J.A.R.V.I.S.                              ║
 ║         Just A Rather Very Intelligent System                ║
 ║                                                              ║
-║  Bot de Discord con control total por voz.                   ║
-║  Escucha → Transcribe → Entiende → Ejecuta → Responde       ║
-║                                                              ║
-║  Solo responde cuando le dices "Jarvis".                     ║
+║  Bot de Discord — Comandos por texto, respuestas por voz.    ║
+║  Escribe "jarvis [comando]" → Bot responde con TTS.          ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 import discord
@@ -14,6 +12,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 from flask import Flask
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,151 +21,90 @@ import config
 from modules import tts_engine
 from modules import command_parser
 from modules import server_manager
-from modules.voice_listener import VoiceListener
 
 # ========================== DISCORD SETUP =========================
 
 intents = discord.Intents.all()
 bot = discord.Client(intents=intents)
 
-# Estado global
-voice_listener = None
-guild_connect_locks = {}
+# Lock por guild para evitar conexiones dobles
+_connect_locks = {}
+_connecting = set()  # guilds que están en proceso de conexión
 
 
 # ========================== CONEXIÓN DE VOZ =======================
 
 async def ensure_connected(target_channel: discord.VoiceChannel):
-    """Conectar al canal de voz con escucha activa."""
+    """Conectar al canal de voz de forma segura. Sin voice_recv."""
     gid = target_channel.guild.id
-    if gid not in guild_connect_locks:
-        guild_connect_locks[gid] = asyncio.Lock()
 
-    async with guild_connect_locks[gid]:
-        vc = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
+    # Si ya estamos conectando, no hacer nada
+    if gid in _connecting:
+        return None
 
-        if vc and vc.is_connected():
-            if vc.channel and vc.channel.id == target_channel.id:
-                return vc
-            try:
-                await vc.move_to(target_channel)
-                return vc
-            except Exception:
+    if gid not in _connect_locks:
+        _connect_locks[gid] = asyncio.Lock()
+
+    async with _connect_locks[gid]:
+        _connecting.add(gid)
+        try:
+            vc = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
+
+            if vc and vc.is_connected():
+                if vc.channel and vc.channel.id == target_channel.id:
+                    return vc
                 try:
-                    await vc.disconnect(force=True)
+                    await vc.move_to(target_channel)
+                    await asyncio.sleep(1)
+                    return vc
+                except Exception:
+                    try:
+                        await vc.disconnect(force=True)
+                        await asyncio.sleep(1)
+                    except Exception:
+                        pass
+
+            try:
+                vc = await target_channel.connect(reconnect=True, timeout=15)
+                await asyncio.sleep(1)
+                print(f"[CONNECTED] {target_channel.name}")
+                return vc
+            except Exception as e:
+                print(f"[ERROR] connect: {e}")
+                # Limpiar conexión fallida
+                try:
+                    tmp = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
+                    if tmp:
+                        await tmp.disconnect(force=True)
                 except Exception:
                     pass
-
-        # Conectar con VoiceRecvClient si STT está disponible
-        connect_kwargs = {"reconnect": True, "timeout": 10}
-        recv_cls = None
-        if voice_listener and voice_listener.enabled:
-            recv_cls = voice_listener.get_voice_recv_client_class()
-            if recv_cls:
-                connect_kwargs["cls"] = recv_cls
-
-        try:
-            vc = await target_channel.connect(**connect_kwargs)
-            if recv_cls and voice_listener and voice_listener.enabled:
-                sink = voice_listener.create_sink()
-                if sink:
-                    try:
-                        vc.listen(sink)
-                        print(f"[LISTENER] Escuchando en: {target_channel.name}")
-                    except Exception as e:
-                        print(f"[WARN] No se pudo iniciar escucha: {e}")
-            return vc
-        except Exception as e:
-            print(f"[ERROR] connect falló: {e}")
-            try:
-                tmp = discord.utils.get(bot.voice_clients, guild=target_channel.guild)
-                if tmp:
-                    await tmp.disconnect(force=True)
-            except Exception:
-                pass
-            try:
-                vc = await target_channel.connect(**connect_kwargs)
-                if recv_cls and voice_listener and voice_listener.enabled:
-                    sink = voice_listener.create_sink()
-                    if sink:
-                        try:
-                            vc.listen(sink)
-                        except Exception:
-                            pass
-                return vc
-            except Exception as e2:
-                print(f"[ERROR] segundo connect falló: {e2}")
                 return None
+        finally:
+            _connecting.discard(gid)
 
 
-# ========================== HANDLER DE COMANDOS DE VOZ ============
-
-async def on_voice_command(user, text: str):
-    """Callback cuando se detecta 'Jarvis' + comando por voz."""
-    member = None
-    guild = None
-    voice_channel = None
-
-    for g in bot.guilds:
-        m = g.get_member(user.id)
-        if m and m.voice and m.voice.channel:
-            member = m
-            guild = g
-            voice_channel = m.voice.channel
-            break
-
-    if not member or not guild:
-        return
-
-    command = command_parser.parse_command(text)
-    if not command:
-        return
-
-    print(f"[COMMAND] {member.display_name}: {command['action']} → {command['params']}")
-
-    response = await server_manager.execute(command, member, guild, voice_channel)
-
-    vc = discord.utils.get(bot.voice_clients, guild=guild)
-    if vc and vc.is_connected():
-        await tts_engine.speak(vc, response)
+def _get_category_voice_channels(guild):
+    """Retorna solo canales de voz en la categoría configurada."""
+    return [ch for ch in guild.voice_channels
+            if ch.category_id == config.VOICE_CATEGORY_ID]
 
 
 # ========================== EVENTOS DE DISCORD ====================
 
-# Cooldown para evitar conexiones simultáneas
-_voice_cooldown = {}
-
-
-def _get_category_voice_channels(guild):
-    """Retorna solo los canales de voz dentro de la categoría configurada."""
-    channels = []
-    for ch in guild.voice_channels:
-        if ch.category_id == config.VOICE_CATEGORY_ID:
-            channels.append(ch)
-    return channels
-
-
 @bot.event
 async def on_ready():
-    global voice_listener
-
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║  JARVIS Online                                               ║
 ║  Usuario: {bot.user}
 ║  Servidores: {len(bot.guilds)}
-║  Categoría de voz: {config.VOICE_CATEGORY_ID}
+║  Categoría: {config.VOICE_CATEGORY_ID}
+║  Modo: Texto → Voz (TTS)                                    ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
 
-    voice_listener = VoiceListener(bot, on_voice_command)
-    if voice_listener.enabled:
-        print("🎤 Sistema de escucha por voz: ACTIVO")
-    else:
-        print("🎤 Sistema de escucha por voz: INACTIVO (solo texto)")
-
-    # Auto-unirse al primer canal con gente (con delay)
-    await asyncio.sleep(3)
+    # Esperar antes de auto-conectar
+    await asyncio.sleep(5)
     for guild in bot.guilds:
         vc = discord.utils.get(bot.voice_clients, guild=guild)
         if vc and vc.is_connected():
@@ -174,59 +112,47 @@ async def on_ready():
         for vc_channel in _get_category_voice_channels(guild):
             humans = [m for m in vc_channel.members if not m.bot]
             if humans:
-                print(f"[AUTO-JOIN] Uniéndose a {vc_channel.name} ({guild.name})")
+                print(f"[AUTO-JOIN] {vc_channel.name} ({guild.name})")
                 await ensure_connected(vc_channel)
                 break
 
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Unirse/moverse/irse SOLO en canales de la categoría asignada."""
+    """Unirse/moverse/irse SOLO en la categoría asignada."""
     if member.bot:
         return
 
     guild = member.guild
-    gid = guild.id
-
-    # Solo actuar si el cambio involucra un canal de la categoría
     after_ch = after.channel
     before_ch = before.channel
+
+    # Solo actuar si involucra nuestra categoría
     after_in_cat = after_ch and after_ch.category_id == config.VOICE_CATEGORY_ID
     before_in_cat = before_ch and before_ch.category_id == config.VOICE_CATEGORY_ID
-
     if not after_in_cat and not before_in_cat:
-        return  # No tiene nada que ver con nuestra categoría
-
-    # Cooldown de 3 segundos por guild
-    import time
-    now = time.time()
-    if gid in _voice_cooldown and (now - _voice_cooldown[gid]) < 3:
         return
-    _voice_cooldown[gid] = now
 
-    await asyncio.sleep(1.5)
+    # Esperar para evitar race conditions
+    await asyncio.sleep(2)
 
     vc = discord.utils.get(bot.voice_clients, guild=guild)
 
-    # Caso 1: Bot NO está conectado → unirse donde haya gente en la categoría
+    # Bot no está conectado → unirse al canal con gente
     if not vc or not vc.is_connected():
-        for voice_ch in _get_category_voice_channels(guild):
-            humans = [m for m in voice_ch.members if not m.bot]
+        if after_in_cat:
+            humans = [m for m in after_ch.members if not m.bot]
             if humans:
-                perms = voice_ch.permissions_for(guild.me)
-                if perms.connect and perms.speak:
-                    print(f"[JOIN] Uniéndose a {voice_ch.name}")
-                    await ensure_connected(voice_ch)
-                return
+                await ensure_connected(after_ch)
         return
 
-    # Caso 2: Bot conectado → verificar si su canal tiene gente
+    # Bot está conectado → verificar si queda gente
     if vc.channel:
         humans_here = [m for m in vc.channel.members if not m.bot]
         if humans_here:
-            return
+            return  # Hay gente, quedarse
 
-        # Canal vacío → buscar otro en la categoría
+        # Buscar otro canal en la categoría con gente
         for voice_ch in _get_category_voice_channels(guild):
             if voice_ch.id == vc.channel.id:
                 continue
@@ -234,36 +160,27 @@ async def on_voice_state_update(member, before, after):
             if humans:
                 try:
                     await vc.move_to(voice_ch)
-                    print(f"[MOVE] Bot se movió a {voice_ch.name}")
+                    print(f"[MOVE] → {voice_ch.name}")
                     await asyncio.sleep(1)
-                    if voice_listener and voice_listener.enabled:
-                        sink = voice_listener.create_sink()
-                        if sink:
-                            try:
-                                vc.listen(sink)
-                            except Exception:
-                                pass
                 except Exception as e:
                     print(f"[MOVE ERROR] {e}")
                 return
 
-        # No hay nadie en la categoría → desconectarse
-        print(f"[LEAVE] Nadie en la categoría — desconectando")
-        if voice_listener:
-            voice_listener.cleanup_all()
+        # Nadie en la categoría → desconectarse
+        print(f"[LEAVE] Nadie en la categoría")
         try:
             if vc.is_playing():
                 vc.stop()
+            await vc.disconnect()
         except Exception:
             pass
-        await vc.disconnect()
 
 
 # ========================== COMANDOS POR TEXTO ====================
 
 @bot.event
 async def on_message(message):
-    """Comandos por texto como fallback."""
+    """Escribe 'jarvis [comando]' y responde por texto + voz."""
     if message.author.bot:
         return
 
@@ -293,7 +210,7 @@ async def on_message(message):
     guild = message.guild
     member = message.author
 
-    print(f"[TEXT CMD] {member.display_name}: {command['action']} → {command['params']}")
+    print(f"[CMD] {member.display_name}: {command['action']} → {command['params']}")
 
     voice_channel = None
     if hasattr(member, 'voice') and member.voice:
@@ -303,9 +220,16 @@ async def on_message(message):
 
     await message.channel.send(f"🤖 **JARVIS:** {response}")
 
+    # Responder con TTS si está en voz
     vc = discord.utils.get(bot.voice_clients, guild=guild)
     if vc and vc.is_connected():
         await tts_engine.speak(vc, response)
+    elif voice_channel and voice_channel.category_id == config.VOICE_CATEGORY_ID:
+        # Si el usuario está en la categoría pero el bot no, unirse
+        vc = await ensure_connected(voice_channel)
+        if vc:
+            await asyncio.sleep(0.5)
+            await tts_engine.speak(vc, response)
 
 
 # ========================== FLASK KEEP-ALIVE ======================
